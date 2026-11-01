@@ -188,6 +188,27 @@ class Store:
                 raise ConflictError(f'block {bid} no longer matches on disk')
             self._write_and_rebuild(b['file'], nt, 'delete block')
 
+
+    @staticmethod
+    def _level(x):
+        if x['type'] != 'section':
+            return 99
+        return ((x.get('meta') or {}).get('level') or 2)
+
+    def _section_end(self, same, i):
+        """Exclusive end of the section starting at i: everything up to the
+        next section of the same or a higher level moves with the heading.
+        Preamble/enddoc blocks never belong to a section."""
+        lv = self._level(same[i])
+        j = i + 1
+        while j < len(same):
+            x = same[j]
+            if x['type'] in NON_EDITABLE or (
+                    x['type'] == 'section' and self._level(x) <= lv):
+                break
+            j += 1
+        return j
+
     def op_move(self, bid, direction, positions=1):
         if direction not in ('up', 'down'):
             raise ValueError("direction must be 'up' or 'down'")
@@ -198,9 +219,38 @@ class Store:
                 raise ValueError(f'cannot move a {b["type"]} block')
             same = [x for x in self.doc['blocks'] if x['file'] == b['file']]
             i = same.index(b)
-            j = i - positions if direction == 'up' else i + positions
-            if j < 0 or j >= len(same):
-                raise ValueError('target position out of range (moves stay within a file)')
+            if b['type'] == 'section':
+                # moving a heading relocates its whole section: swap the
+                # chunk with the neighboring sibling section's chunk
+                lv = self._level(b)
+                end = self._section_end(same, i)
+                sibs = [k for k in range(len(same)) if k != i
+                        and same[k]['type'] == 'section'
+                        and self._level(same[k]) <= lv
+                        and ((direction == 'down' and k > i) or
+                             (direction == 'up' and k < i))]
+                if direction == 'up':
+                    sibs = sorted(sibs, reverse=True)[:positions]
+                    if not sibs:
+                        raise ValueError('no previous section to move past')
+                    tgt = sibs[-1]  # farthest sibling for this many steps
+                    new = (same[:tgt] + same[i:end] + same[tgt:i] + same[end:])
+                else:
+                    sibs = sorted(sibs)[:positions]
+                    if not sibs:
+                        raise ValueError('no following section to move past')
+                    tgtend = self._section_end(same, sibs[-1])
+                    new = (same[:i] + same[end:tgtend] + same[i:end] +
+                           same[tgtend:])
+                srcs = [x['source'] for x in new]
+            else:
+                j = i - positions if direction == 'up' else i + positions
+                if j < 0 or j >= len(same):
+                    raise ValueError(
+                        'target position out of range (moves stay within a file)')
+                srcs = [x['source'] for x in same]
+                moved = srcs.pop(i)
+                srcs.insert(j, moved)
             text, _ = self._read(b['file'])
             lead = text[:same[0]['start']]
             trail = text[same[-1]['end']:]

@@ -948,6 +948,28 @@ function startBlockDrag(grip, node, b) {
       const si = same.findIndex(x => x.id === src.id);
       const ti = same.findIndex(x => x.id === tgt.id);
       if (si < 0 || ti < 0) return;
+      if (src.type === 'section') {
+        // a heading drags its whole section: count sibling-section steps to
+        // the section that owns the drop slot
+        const level = x => x.type === 'section'
+          ? ((x.meta && x.meta.level) || 2) : 99;
+        const lv = level(src);
+        let owner = -1;
+        for (let k = ti; k >= 0; k--) {
+          if (level(same[k]) <= lv) { owner = k; break; }
+        }
+        if (owner < 0 || owner === si) return; // dropped inside its own scope
+        const dir = ti > si ? 'down' : 'up';
+        const sibs = same.map((x, k) => k)
+          .filter(k => k !== si && level(same[k]) <= lv &&
+            (dir === 'down' ? k > si : k < si));
+        const positions = dir === 'down'
+          ? sibs.filter(k => k <= owner).length
+          : sibs.filter(k => k >= owner).length;
+        if (positions < 1) return;
+        await moveBlockFn(src, dir, positions);
+        return;
+      }
       const target = ti + (slot.after ? 1 : 0);
       if (target === si || target === si + 1) return; // dropped onto itself
       const direction = target > si ? 'down' : 'up';
