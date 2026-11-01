@@ -778,14 +778,51 @@ function renderSidebar() {
     };
     fl.append(btn);
   }
-  for (const b of state.doc.blocks) {
-    if (b.type !== 'section') continue;
+  // collapsible outline: build the section tree, hide entries whose
+  // ancestors are folded
+  if (!state.outlineCollapsed) state.outlineCollapsed = new Set();
+  const secs = state.doc.blocks.filter(b => b.type === 'section');
+  const entries = [];
+  const stack = [];
+  for (const b of secs) {
+    const lv = (b.meta && b.meta.level) || 2;
+    while (stack.length && stack[stack.length - 1].lv >= lv) stack.pop();
+    entries.push({b, lv, parent: stack.length ? stack[stack.length - 1].id : null});
+    stack.push({id: b.id, lv});
+  }
+  const byId = new Map(entries.map(e => [e.b.id, e]));
+  const hasKids = new Set(entries.filter(e => e.parent).map(e => e.parent));
+  const hiddenByFold = new Set();
+  for (const e of entries) {
+    let p = e.parent;
+    while (p) {
+      if (state.outlineCollapsed.has(p)) hiddenByFold.add(e.b.id);
+      p = (byId.get(p) || {}).parent || null;
+    }
+  }
+  for (const e of entries) {
+    if (hiddenByFold.has(e.b.id)) continue;
     const item = el('button', 'oitem');
-    item.style.setProperty('--indent', ((b.meta.level || 2) - 1));
-    item.dataset.block = b.id;
-    const num = state.secNums.get(b.id);
-    item.innerHTML = (num ? num + '&nbsp;&nbsp;' : '') + renderInline(b.meta.title || '(untitled)');
-    item.onclick = () => scrollToBlock(b.id);
+    item.style.setProperty('--indent', (e.lv - 1));
+    item.dataset.block = e.b.id;
+    const num = state.secNums.get(e.b.id);
+    const collapsed = state.outlineCollapsed.has(e.b.id);
+    const chev = hasKids.has(e.b.id)
+      ? `<span class="ochev" data-oc="${e.b.id}" title="${collapsed ? 'Expand' : 'Collapse'}">${collapsed ? '▸' : '▾'}</span>`
+      : '<span class="ochev noleaf"></span>';
+    item.innerHTML = chev + (num ? num + '&nbsp;&nbsp;' : '') +
+      renderInline(e.b.meta.title || '(untitled)');
+    item.onclick = ev => {
+      const chevEl = ev.target.closest('.ochev');
+      if (chevEl && !chevEl.classList.contains('noleaf')) {
+        state.outlineCollapsed.has(e.b.id)
+          ? state.outlineCollapsed.delete(e.b.id)
+          : state.outlineCollapsed.add(e.b.id);
+        renderSidebar();
+        return;
+      }
+      scrollToBlock(e.b.id);
+    };
     ol.append(item);
   }
   updateOutlineCurrent();
@@ -1774,6 +1811,7 @@ function switchProject(pid) {
   if (pid === state.project) return;
   if (state.edit) closeEditor();
   state.project = pid;
+  // don't let the previous project's change set bleed into the new one
   state.git = null;
   state.gitChanged = new Set();
   state.gitShowDiff = false;
@@ -1785,14 +1823,17 @@ function switchProject(pid) {
   refreshDoc();
 }
 
-async function removeProject() {
-  if (!state.project) return;
-  const p = state.projects.find(x => x.id === state.project);
-  if (!confirm(`Remove project "${p ? p.name : state.project}" from the editor?\n(Files on disk are not touched.)`)) return;
+async function removeProject(pid) {
+  const target = pid || state.project;
+  if (!target) return;
+  const p = state.projects.find(x => x.id === target);
+  if (!confirm(`Remove project "${p ? p.name : target}" from the editor?\n(Files on disk are not touched.)`)) return;
   try {
-    await api(`/api/project/${state.project}`, {method: 'DELETE'});
-    state.project = null;
-    state.doc = null;
+    await api(`/api/project/${target}`, {method: 'DELETE'});
+    if (state.project === target) {
+      state.project = null;
+      state.doc = null;
+    }
     await refreshProjects();
     toast('Project removed');
   } catch (e) { toast('Remove failed: ' + e.message, true); }
@@ -1961,1509 +2002,763 @@ async function openBrowseModal() {
     }
   };
   await load(state.browsePath ? state.browsePath.path : '');
-/* ------------------------------------------------------------------ */
+}
 
+/* ------------------------------------------------------------------ */
 /* git: status panel, block highlighting, diff-only view, commit, push */
-
 /* ------------------------------------------------------------------ */
-
-
 
 let gitTimer = null;
-
 function scheduleGitRefresh(delay = 600) {
-
   clearTimeout(gitTimer);
-
   gitTimer = setTimeout(refreshGit, delay);
-
 }
-
-
 
 // section id → number of changed blocks in its scope (itself + content
-
 // up to the next section of any level) — drives the outline markers
-
 function computeSectionChanges() {
-
   const counts = new Map();
-
   if (!state.doc) return counts;
-
   let cur = null;
-
   for (const b of state.doc.blocks) {
-
     if (b.type === 'section') cur = b.id;
-
     if (cur !== null && state.gitChanged.has(b.id)) {
-
       counts.set(cur, (counts.get(cur) || 0) + 1);
-
     }
-
   }
-
   return counts;
-
 }
-
-
 
 function applyOutlineGitMarks() {
-
   if (!state.doc) return;
-
   const counts = computeSectionChanges();
-
   document.querySelectorAll('#outline .oitem').forEach(item => {
-
     const c = counts.get(item.dataset.block) || 0;
-
     item.classList.toggle('git-changed', c > 0);
-
     let badge = item.querySelector('.ochanges');
-
     if (c > 0) {
-
       if (badge) badge.textContent = String(c);
-
       else item.append(el('span', 'ochanges', String(c)));
-
     } else if (badge) badge.remove();
-
   });
-
 }
-
-
 
 // toggle the git-change class on the blocks already in the DOM — avoids a
-
 // full content re-render (and scroll jump) whenever only highlighting changes
-
 function applyGitHighlights() {
-
   document.querySelectorAll('#content .block').forEach(n => {
-
     n.classList.toggle('git-change', state.gitHl && state.gitChanged.has(n.dataset.id));
-
   });
-
 }
-
-
 
 async function fetchGitChanges() {
-
   try {
-
     const ch = await papi('/git/changes');
-
     state.gitChanged = new Set(ch.ids);
-
   } catch (e) { /* status panel still works; highlighting stays as-is */ }
-
 }
-
-
 
 async function refreshGit() {
-
   if (!state.project) {
-
     state.git = null;
-
     state.gitChanged = new Set();
-
     renderGit();
-
     return;
-
   }
-
   try {
-
     state.git = await papi('/git/status');
-
     if (state.git.repo) await fetchGitChanges();
-
     else state.gitChanged = new Set();
-
   } catch (e) {
-
     return; // git hiccups shouldn't nag on every save
-
   }
-
   renderGit();
-
   applyGitHighlights();
-
   applyOutlineGitMarks();
-
   if (state.gitShowDiff) renderContent(); // keep the diff filter current
-
 }
-
-
 
 function toggleGitHl() {
-
   state.gitHl = !state.gitHl;
-
   applyGitHighlights();
-
   renderGit();
-
 }
-
-
 
 function toggleDiffOnly() {
-
   state.gitShowDiff = !state.gitShowDiff;
-
   // preserve the reading position across the re-render
-
   const content = $('#content');
-
   const firstVisible = [...document.querySelectorAll('.block')]
-
     .find(n => n.getBoundingClientRect().bottom > 0);
-
   const anchorId = firstVisible ? firstVisible.dataset.id : null;
-
   const prevOffset = anchorId
-
     ? (document.querySelector(`.block[data-id="${anchorId}"]`) || {}).offsetTop : 0;
-
   renderContent();
-
   renderGit();
-
   if (anchorId) {
-
     const n = document.querySelector(`.block[data-id="${anchorId}"]`);
-
     if (n) content.scrollTop += n.offsetTop - prevOffset;
-
   }
-
 }
-
-
 
 function renderGit() {
-
   const panel = $('#gitpanel');
-
   panel.innerHTML = '';
-
   $('#gitHead').classList.toggle('hidden', !state.project);
-
   if (!state.project) return;
-
   const g = state.git;
-
   if (!g) {
-
     panel.append(el('div', 'gitmuted', 'checking…'));
-
     return;
-
   }
-
   if (!g.repo) {
-
     panel.append(el('div', 'gitmuted', 'Not a git repository.'));
-
     const btn = el('button', 'edbtn gitinit', 'Initialize repository');
-
     btn.onclick = gitInit;
-
     panel.append(btn);
-
     return;
-
   }
-
-
 
   // header: branch + ahead/behind + manual refresh
-
   const head = el('div', 'githead');
-
   head.append(el('span', 'gitbranch', '⎇ ' + (g.branch || 'HEAD')));
-
   if (g.ahead || g.behind) {
-
     head.append(el('span', 'gitsync',
-
       (g.ahead ? `↑${g.ahead}` : '') + (g.behind ? `↓${g.behind}` : '')));
-
   }
-
   head.append(el('span', 'spacer'));
-
   const refresh = el('button', 'gbtn', '↻');
-
   refresh.title = 'Refresh git status';
-
   refresh.onclick = () => refreshGit();
-
   head.append(refresh);
-
   panel.append(head);
 
-
-
   // view toggles
-
   const views = el('div', 'gitviews');
-
   const hlBtn = el('button', 'gtoggle' + (state.gitHl ? ' on' : ''), 'Highlight changes');
-
   hlBtn.onclick = toggleGitHl;
-
   const diffBtn = el('button', 'gtoggle' + (state.gitShowDiff ? ' on' : ''), 'Only diff');
-
   diffBtn.onclick = toggleDiffOnly;
-
   views.append(hlBtn, diffBtn);
-
   panel.append(views);
 
-
-
   if (g.staged.length) panel.append(gitFileGroup('Staged changes', g.staged, 'staged'));
-
   if (g.unstaged.length) panel.append(gitFileGroup('Changes', g.unstaged, 'unstaged'));
-
   if (g.untracked.length) panel.append(gitFileGroup('Untracked', g.untracked, 'untracked'));
-
   if (!g.staged.length && !g.unstaged.length && !g.untracked.length) {
-
     panel.append(el('div', 'gitmuted', 'Working tree clean ✓'));
-
   }
-
-
 
   // commit helper (VS Code style): message box + commit/push
-
   const ta = el('textarea', 'gitmsg');
-
   ta.placeholder = 'Commit message (Ctrl+Enter to commit on all files)';
-
   ta.rows = 3;
-
   const bar = el('div', 'gitbar');
-
   const commitBtn = el('button', 'edbtn primary', '✓ Commit');
-
   const pushBtn = el('button', 'edbtn', '⇅ Push');
-
   if (!g.has_remote) {
-
     pushBtn.disabled = true;
-
     pushBtn.title = 'No remote configured — add one with:\ngit remote add origin <url>';
-
   }
-
   commitBtn.onclick = () => gitCommit(ta);
-
   pushBtn.onclick = gitPush;
-
   bar.append(commitBtn, pushBtn);
-
   panel.append(ta, bar);
-
   ta.addEventListener('keydown', e => {
-
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-
       e.preventDefault();
-
       gitCommit(ta);
-
     }
-
   });
-
 }
-
-
 
 function gitFileGroup(title, paths, kind) {
-
   const wrap = el('div', 'gitgroup');
-
   wrap.append(el('div', 'gitgrouphead', `${title} (${paths.length})`));
-
   for (const p of paths) {
-
     const row = el('div', 'gitrow');
-
     const name = el('span', 'gitpath', esc(p));
-
     name.title = p;
-
     row.append(name);
-
     const mk = (label, tip, fn) => {
-
       const b = el('button', 'gbtn', label);
-
       b.title = tip;
-
       b.onclick = ev => { ev.stopPropagation(); fn(); };
-
       return b;
-
     };
-
     if (kind === 'staged') {
-
       row.append(mk('⧉', 'View diff', () => openGitDiff(p, true)));
-
       row.append(mk('−', 'Unstage', () => gitPaths('unstage', [p])));
-
     } else {
-
       row.append(mk('⧉', 'View diff', () => openGitDiff(p, false)));
-
       if (kind === 'unstaged') row.append(mk('↩', 'Discard changes', () => gitDiscard(p)));
-
       row.append(mk('+', 'Stage', () => gitPaths('stage', [p])));
-
     }
-
     wrap.append(row);
-
   }
-
   return wrap;
-
 }
-
-
 
 // stage / unstage are safe ops — refresh straight from the response
-
 async function gitPaths(op, paths) {
-
   try {
-
     const res = await ppost(`/git/${op}`, {paths});
-
     state.git = res.status;
-
     await fetchGitChanges();
-
     renderGit();
-
     applyGitHighlights();
-
     applyOutlineGitMarks();
-
   } catch (e) { toast(`Git ${op} failed: ` + e.message, true); }
-
 }
-
-
 
 async function gitDiscard(p) {
-
   if (!confirm(`Discard all uncommitted changes in "${p}"?\nThis cannot be undone.`)) return;
-
   try {
-
     const res = await ppost('/git/discard', {paths: [p]});
-
     state.git = res.status;
-
     await fetchGitChanges();
-
     renderGit();
-
     applyGitHighlights();
-
     applyOutlineGitMarks();
-
     refreshDoc(); // the worktree changed underneath us
-
   } catch (e) { toast('Discard failed: ' + e.message, true); }
-
 }
-
-
 
 async function gitCommit(ta) {
-
   const msg = ta.value.trim();
-
   if (!msg) { toast('Enter a commit message first', true); ta.focus(); return; }
-
   const g = state.git;
-
   let paths = null;
-
   if (g && !g.staged.length) {
-
     if (!g.unstaged.length && !g.untracked.length) { toast('Nothing to commit'); return; }
-
     if (!confirm('Nothing is staged — stage all changes and commit?')) return;
-
     paths = [...g.unstaged, ...g.untracked];
-
   }
-
   try {
-
     const res = await ppost('/git/commit', {message: msg, paths});
-
     state.git = res.status;
-
     ta.value = '';
-
     await fetchGitChanges();
-
     renderGit();
-
     applyGitHighlights();
-
     applyOutlineGitMarks();
-
     toast('Committed: ' + res.summary);
-
   } catch (e) { toast('Commit failed: ' + e.message, true); }
-
 }
-
-
 
 async function gitPush() {
-
   try {
-
     const res = await ppost('/git/push', {});
-
     state.git = res.status;
-
     renderGit();
-
     toast('Pushed to remote');
-
   } catch (e) {
-
     let msg = 'Push failed: ' + e.message;
-
     if (/no upstream/i.test(e.message) && state.git && state.git.branch) {
-
       msg += ` — run: git push -u origin ${state.git.branch}`;
-
     }
-
     toast(msg, true);
-
   }
-
 }
-
-
 
 async function gitInit() {
-
   try {
-
     const res = await ppost('/git/init', {});
-
     state.git = res.status;
-
     await fetchGitChanges();
-
     renderGit();
-
     applyGitHighlights();
-
     applyOutlineGitMarks();
-
     toast('Git repository initialized');
-
   } catch (e) { toast('git init failed: ' + e.message, true); }
-
 }
-
-
 
 // unified diff → colored lines; spans are display:block so backgrounds
-
 // cover the full line width
-
 function renderDiffText(text) {
-
   if (!text || !text.trim()) return '<span class="d-none">No differences.</span>';
-
   return text.split('\n').map(line => {
-
     const t = esc(line) || '&nbsp;';
-
     if (line.startsWith('@@')) return `<span class="d-hunk">${t}</span>`;
-
     if (line.startsWith('+') && !line.startsWith('+++')) return `<span class="d-add">${t}</span>`;
-
     if (line.startsWith('-') && !line.startsWith('---')) return `<span class="d-del">${t}</span>`;
-
     if (line.startsWith('diff ') || line.startsWith('index ') ||
-
         line.startsWith('--- ') || line.startsWith('+++ ')) {
-
       return `<span class="d-meta">${t}</span>`;
-
     }
-
     return `<span>${t}</span>`;
-
   }).join('');
-
 }
-
-
 
 async function openGitDiff(path, staged = false) {
-
   const modal = $('#gitmodal');
-
   modal.classList.remove('hidden');
-
   modal.innerHTML = '';
-
   const wrap = el('div', 'gitdiffwrap');
-
   wrap.append(el('h3', '', (staged ? 'Staged changes — ' : 'Changes — ') + esc(path)));
-
   const pre = el('pre', 'gitdiffpre', 'loading…');
-
   wrap.append(pre);
-
   const bar = el('div', 'edbar');
-
   const closeBtn = el('button', 'edbtn', 'Close');
-
   bar.append(el('span', 'spacer'), closeBtn);
-
   wrap.append(bar);
-
   modal.append(wrap);
 
-
-
   const escClose = ev => { if (ev.key === 'Escape') close(); };
-
   const close = () => {
-
     document.removeEventListener('keydown', escClose, true);
-
     modal.classList.add('hidden');
-
     modal.innerHTML = '';
-
   };
-
   document.addEventListener('keydown', escClose, true);
-
   closeBtn.onclick = close;
-
   modal.addEventListener('click', e => { if (e.target === modal) close(); });
 
-
-
   try {
-
     const res = await papi(`/git/diff?path=${encodeURIComponent(path)}&staged=${staged ? 1 : 0}`);
-
     pre.innerHTML = renderDiffText(res.text);
-
   } catch (e) {
-
     pre.textContent = 'Failed to load diff: ' + e.message;
-
   }
-
 }
 
 /* ------------------------------------------------------------------ */
-
 /* proofreading: panel, squiggles, apply suggestion                    */
-
 /* ------------------------------------------------------------------ */
-
-
 
 function proofLang() {
-
   return localStorage.getItem('proof-lang') || 'en-US';
-
 }
-
-
 
 // issue text is snapshotted at check time so a stale issue (block edited
-
 // since) can be detected before any rewrite is attempted
-
 function pruneProofIssues(doc) {
-
   if (!state.proof.issues.length) return;
-
   const byId = new Map(doc.blocks.map(b => [b.id, b]));
-
   state.proof.issues = state.proof.issues.filter(i => {
-
     const b = byId.get(i.block_id);
-
     return b && b.source.slice(i.start, i.end) === i.text;
-
   });
-
 }
-
-
 
 // parsed bibliography for citation resolution — refreshed on load, project
-
 // switch and after each compile (the .bbl changes there)
-
 async function refreshBib() {
-
   if (!state.project) { state.bib = null; return; }
-
   try {
-
     const res = await papi('/bibliography');
-
     state.bib = res.available ? res : null;
-
   } catch (e) { state.bib = null; }
-
   if (state.doc) rerenderContentPreservingScroll();
-
 }
-
-
 
 async function loadProofConfig() {
-
   if (!state.project) { state.proof.config = null; renderProof(); return; }
-
   try { state.proof.config = await papi('/proof/config'); }
-
   catch (e) {
-
     state.proof.config = {engine: '?', available: false, error: e.message};
-
   }
-
   renderProof();
-
   // background check when the app (or a project) is opened
-
   if (state.proof.config.available && !state.proof.checked &&
-
       !state.proof.checking) {
-
     checkDocument();
-
   }
-
 }
-
-
 
 function renderProof() {
-
   const panel = $('#proofpanel');
-
   panel.innerHTML = '';
-
   $('#proofHead').classList.toggle('hidden', !state.project);
-
   if (!state.project) return;
-
   const p = state.proof;
 
-
-
   // controls: language + manual check
-
   const bar = el('div', 'proofbar');
-
   const sel = el('select', 'prooflang');
-
   for (const [code, label] of [['en-US', 'English'], ['de-DE', 'Deutsch']]) {
-
     const o = el('option', '', label);
-
     o.value = code;
-
     if (code === proofLang()) o.selected = true;
-
     sel.append(o);
-
   }
-
   sel.title = 'Language for the proofreading check';
-
   sel.onchange = () => {
-
     localStorage.setItem('proof-lang', sel.value);
-
     state.proof.issues = []; // results are language-specific
-
     state.proof.checked = false;
-
     renderProof();
-
     rerenderContentPreservingScroll();
-
   };
-
   const btn = el('button', 'edbtn primary proofcheck',
-
     p.checking ? 'checking…' : 'Check document');
-
   btn.disabled = p.checking;
-
   btn.onclick = checkDocument;
-
   bar.append(sel, btn);
-
   panel.append(bar);
 
-
-
   if (p.config && !p.config.available) {
-
     panel.append(el('div', 'pferrbox',
-
       esc(p.config.error || 'proofreading engine unavailable')));
-
   }
-
-
 
   if (!p.issues.length) {
-
     if (p.checked) panel.append(el('div', 'gitmuted', 'No issues found ✓'));
-
     return;
-
   }
-
   panel.append(el('div', 'gitmuted',
-
     `${p.issues.length} issue${p.issues.length === 1 ? '' : 's'}`));
-
   // rows in document order
-
   const order = new Map(state.doc.blocks.map((b, ix) => [b.id, ix]));
-
   const sorted = [...p.issues].sort((a, b) =>
-
     (order.get(a.block_id) ?? 1e9) - (order.get(b.block_id) ?? 1e9) ||
-
     a.start - b.start);
-
   for (const it of sorted) panel.append(proofRow(it));
-
 }
-
-
 
 function proofRow(it) {
-
   const row = el('div', 'pfrow');
-
   row.title = it.file + ' — click to jump to the word';
-
   row.onclick = () => gotoIssue(it);
-
   const top = el('div', 'pfrowtop');
-
   top.append(el('span', 'pfbadge pf-' + esc(it.category || 'grammar'),
-
     esc(it.category || 'grammar')));
-
   const word = (it.text || '').replace(/\s+/g, ' ').trim();
-
   if (word) top.append(el('span', 'pfword', '“' + esc(word) + '”'));
-
   top.append(el('span', 'spacer'));
-
   const isMisspell = it.category === 'misspelling' || it.category === 'typo';
-
   if (isMisspell && it.text) {
-
     const dict = el('button', 'gbtn', '＋');
-
     dict.title = `Add “${it.text.trim()}” to the project dictionary`;
-
     dict.onclick = ev => { ev.stopPropagation(); addToDictionary(it); };
-
     top.append(dict);
-
   }
-
   const x = el('button', 'gbtn', '✕');
-
   x.title = 'Ignore this case for this project (persisted)';
-
   x.onclick = ev => {
-
     ev.stopPropagation();
-
     ignoreIssue(it);
-
   };
-
   top.append(x);
-
   row.append(top);
-
   // reason below the kind + word
-
   const msg = el('div', 'pfmsg', esc(it.message));
-
   msg.title = it.message; // full text even if the row grows tall
-
   row.append(msg);
-
   if (it.replacements && it.replacements.length) {
-
     const sugg = el('div', 'pfsugg');
-
     for (const r of it.replacements.slice(0, 4)) {
-
       const chip = el('button', 'pfchip', esc(r));
-
       chip.title = 'Replace with “' + r + '”';
-
       chip.onclick = ev => { ev.stopPropagation(); applyProofFix(it, r); };
-
       sugg.append(chip);
-
     }
-
     row.append(sugg);
-
   }
-
   return row;
-
 }
-
-
 
 // the rendered squiggle span of an issue (matched by flagged text)
-
 function issueSpanEl(it) {
-
   const node = $(`.block[data-id="${it.block_id}"]`);
-
   if (!node) return null;
-
   const word = (it.text || '').replace(/\s+/g, ' ').trim();
-
   if (!word) return null;
-
   return [...node.querySelectorAll('.pf-err')]
-
     .find(s => (s.textContent || '').replace(/\s+/g, ' ').trim() === word) || null;
-
 }
-
-
 
 // jump to an issue: scroll only when the word is off-screen, then flash it
-
 function gotoIssue(it) {
-
   const span = issueSpanEl(it);
-
   const target = span || $(`.block[data-id="${it.block_id}"]`);
-
   if (!target) return;
-
   const r = target.getBoundingClientRect();
-
   const visible = r.top >= 0 && r.bottom <= window.innerHeight;
-
   if (!visible) target.scrollIntoView({behavior: 'smooth', block: 'center'});
-
   setTimeout(() => flashIssueWord(it), visible ? 0 : 650);
-
 }
-
-
 
 // briefly highlight the flagged word itself, not the whole paragraph;
-
 // falls back to the block when the word span isn't rendered (e.g. exotic
-
 // table content that the preview reconstructs)
-
 function flashIssueWord(it) {
-
   let target = issueSpanEl(it);
-
   if (!target) target = $(`.block[data-id="${it.block_id}"]`);
-
   if (!target) return;
-
   target.classList.remove('pf-flash');
-
   void target.offsetWidth; // restart the animation if it is already running
-
   target.classList.add('pf-flash');
-
   setTimeout(() => target.classList.remove('pf-flash'), 2600);
-
 }
-
-
 
 function dropProofIssue(issue) {
-
   state.proof.issues = state.proof.issues.filter(o => o !== issue);
-
   renderProof();
-
   rerenderContentPreservingScroll();
-
 }
-
-
 
 // re-render the content area without losing the reading position
-
 function rerenderContentPreservingScroll() {
-
   const content = $('#content');
-
   const firstVisible = [...document.querySelectorAll('.block')]
-
     .find(n => n.getBoundingClientRect().bottom > 0);
-
   const anchorId = firstVisible ? firstVisible.dataset.id : null;
-
   const prevOffset = anchorId
-
     ? (document.querySelector(`.block[data-id="${anchorId}"]`) || {}).offsetTop : 0;
-
   renderContent();
-
   if (anchorId) {
-
     const n = document.querySelector(`.block[data-id="${anchorId}"]`);
-
     if (n) content.scrollTop += n.offsetTop - prevOffset;
-
   }
-
 }
-
-
 
 async function checkDocument() {
-
   if (!state.project || state.proof.checking) return;
-
   state.proof.checking = true;
-
   renderProof();
-
   try {
-
     const res = await ppost('/proof/check', {lang: proofLang()});
-
     // snapshot the flagged text so staleness can be detected later
-
     const byId = new Map(state.doc.blocks.map(b => [b.id, b]));
-
     for (const i of res.issues) {
-
       const b = byId.get(i.block_id);
-
       i.text = b ? b.source.slice(i.start, i.end) : '';
-
     }
-
     state.proof.issues = mergeIssues([], res.issues);
-
     state.proof.checked = true;
-
   } catch (e) {
-
     toast('Check failed: ' + e.message, true);
-
   } finally {
-
     state.proof.checking = false;
-
     renderProof();
-
     rerenderContentPreservingScroll();
-
   }
-
 }
-
-
 
 // re-check only the given blocks (after an edit) and merge into the results
-
 async function checkBlocks(ids) {
-
   if (!state.project || !ids || !ids.length) return;
-
   try {
-
     const res = await ppost('/proof/check',
-
       {lang: proofLang(), block_ids: ids});
-
     const byId = new Map(state.doc.blocks.map(b => [b.id, b]));
-
     for (const i of res.issues) {
-
       const b = byId.get(i.block_id);
-
       i.text = b ? b.source.slice(i.start, i.end) : '';
-
     }
-
     const idset = new Set(ids);
-
     const kept = state.proof.issues.filter(i => !idset.has(i.block_id));
-
     state.proof.issues = mergeIssues(kept, res.issues);
-
     state.proof.checked = true;
-
     renderProof();
-
     rerenderContentPreservingScroll();
-
   } catch (e) { /* background re-check: stay quiet */ }
-
 }
-
-
 
 // combine issue lists and sort in document order; dictionary words and
-
 // persisted ignored cases are already filtered server-side
-
 function mergeIssues(base, extra) {
-
   const all = [...base, ...extra];
-
   const order = new Map(state.doc.blocks.map((b, ix) => [b.id, ix]));
-
   return all.sort((a, b) =>
-
     (order.get(a.block_id) ?? 1e9) - (order.get(b.block_id) ?? 1e9) ||
-
     a.start - b.start);
-
 }
-
-
 
 // ignore key is text-based so it survives offset shifts within a block
-
 function ignoreKey(it) {
-
   return it.rule_id + '\u0000' + (it.text || '').replace(/\s+/g, ' ').trim();
-
 }
-
-
 
 // persist one ignored case (rule + flagged text) for this project
-
 async function ignoreIssue(issue) {
-
   try {
-
     await ppost('/proof/ignore',
-
       {rule: issue.rule_id, text: (issue.text || '').trim()});
-
     const key = ignoreKey(issue);
-
     state.proof.issues = state.proof.issues.filter(i => ignoreKey(i) !== key);
-
     renderProof();
-
     rerenderContentPreservingScroll();
-
     toast('Case ignored for this project — it will not come back on re-checks');
-
   } catch (e) {
-
     toast('Ignore failed: ' + e.message, true);
-
   }
-
 }
-
-
 
 // persist a word for this project and drop every issue for it
-
 async function addToDictionary(issue) {
-
   const word = (issue.text || '').replace(/\s+/g, ' ').trim();
-
   if (!word) return;
-
   try {
-
     await ppost('/proof/dictionary', {word});
-
     const w = word.toLowerCase();
-
     state.proof.issues = state.proof.issues.filter(i =>
-
       (i.text || '').replace(/\s+/g, ' ').trim().toLowerCase() !== w);
-
     renderProof();
-
     rerenderContentPreservingScroll();
-
     toast(`“${word}” added to the project dictionary`);
-
   } catch (e) {
-
     toast('Failed to add word: ' + e.message, true);
-
   }
-
 }
-
-
 
 /* ---- hover popup on squiggled words ---- */
 
-
-
 let pfPopup = null;
-
 let pfHideTimer = null;
 
-
-
 function hideProofPopup() {
-
   clearTimeout(pfHideTimer);
-
   if (pfPopup) { pfPopup.remove(); pfPopup = null; }
-
 }
-
-
 
 function showProofPopup(span) {
-
   const blockEl = span.closest('.block');
-
   const word = (span.textContent || '').replace(/\s+/g, ' ').trim();
-
   if (!blockEl || !word) return;
-
   const issue = state.proof.issues.find(i =>
-
     i.block_id === blockEl.dataset.id &&
-
     (i.text || '').replace(/\s+/g, ' ').trim() === word);
-
   if (!issue) return;
-
   hideProofPopup();
-
   const pop = el('div', 'pfpopup');
-
   const head = el('div', 'pfpopuphead');
-
   head.append(el('span', 'pfbadge pf-' + esc(issue.category || 'grammar'),
-
     esc(issue.category || 'grammar')));
-
   const x = el('button', 'gbtn', '✕');
-
   x.title = 'Close';
-
   x.onclick = hideProofPopup;
-
   head.append(el('span', 'spacer'), x);
-
   pop.append(head);
-
   pop.append(el('div', 'pfpopupmsg', esc(issue.message)));
-
   if (issue.replacements && issue.replacements.length) {
-
     const sugg = el('div', 'pfsugg');
-
     for (const r of issue.replacements.slice(0, 5)) {
-
       const chip = el('button', 'pfchip', esc(r));
-
       chip.title = 'Replace with “' + r + '”';
-
       chip.onclick = () => { hideProofPopup(); applyProofFix(issue, r); };
-
       sugg.append(chip);
-
     }
-
     pop.append(sugg);
-
   }
-
   if (issue.category === 'misspelling' || issue.category === 'typo') {
-
     const dict = el('button', 'pfdict', `＋ Add “${word}” to dictionary`);
-
     dict.onclick = () => { hideProofPopup(); addToDictionary(issue); };
-
     pop.append(dict);
-
   }
-
   const ign = el('button', 'pfdict', '✕ Ignore this case');
-
   ign.title = 'Persisted for this project — re-checks will not report it again';
-
   ign.onclick = () => { hideProofPopup(); ignoreIssue(issue); };
-
   pop.append(ign);
-
   document.body.append(pop);
-
   // place below the squiggled span, clamped to the viewport
-
   const r = span.getBoundingClientRect();
-
   const pw = pop.offsetWidth, ph = pop.offsetHeight;
-
   let left = r.left + window.scrollX;
-
   let top = r.bottom + window.scrollY + 4;
-
   if (left + pw > window.scrollX + document.documentElement.clientWidth - 8) {
-
     left = window.scrollX + document.documentElement.clientWidth - pw - 8;
-
   }
-
   if (top + ph > window.scrollY + window.innerHeight &&
-
       r.top - ph > 0) {
-
     top = r.top + window.scrollY - ph - 4; // flip above when near the bottom
-
   }
-
   pop.style.left = left + 'px';
-
   pop.style.top = top + 'px';
-
   pfPopup = pop;
-
 }
-
-
 
 function showCitePopup(span) {
-
   const keys = (span.dataset.keys || '').split(',').map(s => s.trim()).filter(Boolean);
-
   const bib = state.bib;
-
   if (!bib || !bib.available || !keys.length) return;
-
   const byKey = new Map(bib.entries.map(e => [e.key, e]));
-
   hideProofPopup();
-
   const pop = el('div', 'pfpopup citepopup');
-
   const head = el('div', 'pfpopuphead');
-
   head.append(el('span', 'pfbadge', 'reference' +
-
     (keys.length > 1 ? 's' : '')));
-
   head.append(el('span', 'spacer'));
-
   const x = el('button', 'gbtn', '✕');
-
   x.title = 'Close';
-
   x.onclick = hideProofPopup;
-
   head.append(x);
-
   pop.append(head);
-
   let shown = 0;
-
   for (const k of keys) {
-
     const e = byKey.get(k);
-
     if (!e) continue;
-
     shown++;
-
     const item = el('div', 'citeitem');
-
     item.append(el('div', 'citekey', bib.style === 'numeric'
-
       ? '[' + e.num + '] ' + esc(k) : esc(k)));
-
     item.append(el('div', 'citetext', esc(e.plain)));
-
     pop.append(item);
-
   }
-
   if (!shown) return;
-
   document.body.append(pop);
-
   // same placement as the proof popup: below the span, clamped, flipped up
-
   const r = span.getBoundingClientRect();
-
   const pw = pop.offsetWidth, ph = pop.offsetHeight;
-
   let left = r.left + window.scrollX;
-
   let top = r.bottom + window.scrollY + 4;
-
   if (left + pw > window.scrollX + document.documentElement.clientWidth - 8) {
-
     left = window.scrollX + document.documentElement.clientWidth - pw - 8;
-
   }
-
   if (top + ph > window.scrollY + window.innerHeight && r.top - ph > 0) {
-
     top = r.top + window.scrollY - ph - 4;
-
   }
-
   pop.style.left = left + 'px';
-
   pop.style.top = top + 'px';
-
   pfPopup = pop;
-
 }
-
-
 
 function initProofHover() {
-
   document.addEventListener('mouseover', ev => {
-
     const cite = ev.target.closest && ev.target.closest('.citeref');
-
     if (cite) {
-
       clearTimeout(pfHideTimer);
-
       showCitePopup(cite);
-
       return;
-
     }
-
     const span = ev.target.closest && ev.target.closest('.pf-err');
-
     if (span) {
-
       clearTimeout(pfHideTimer);
-
       showProofPopup(span);
-
     } else if (pfPopup && !(ev.target.closest && ev.target.closest('.pfpopup'))) {
-
       // small grace period so the short hop to the popup doesn't close it
-
       clearTimeout(pfHideTimer);
-
       pfHideTimer = setTimeout(hideProofPopup, 450);
-
     } else if (pfPopup) {
-
       clearTimeout(pfHideTimer); // pointer is on the popup
-
     }
-
   });
-
   document.addEventListener('scroll', () => {
-
     if (pfPopup) hideProofPopup();
-
   }, true);
-
   window.addEventListener('resize', hideProofPopup);
-
 }
 
-
-
 async function applyProofFix(issue, replacement) {
-
   const b = state.doc ? state.doc.blocks.find(x => x.id === issue.block_id) : null;
-
   if (!b) { toast('Block no longer exists — re-check first', true); return; }
-
   if (b.source.slice(issue.start, issue.end) !== issue.text) {
-
     toast('Text changed since the check — re-check first', true);
-
     dropProofIssue(issue);
-
     return;
-
   }
-
   if (state.edit && state.edit.id === issue.block_id) closeEditor();
-
   const newSource = b.source.slice(0, issue.start) +
-
     replacement + b.source.slice(issue.end);
-
   try {
-
     const res = await ppost(`/block/${issue.block_id}/save`, {source: newSource});
-
     applyDoc(res.doc); // also prunes stale issues and re-renders
-
     toast('Suggestion applied');
-
     checkBlocks([issue.block_id]); // re-check the fixed block
   } catch (e) { handleOpError(e, b); }
 }
+
 /* ------------------------------------------------------------------ */
 /* theme: dark default, persisted light/dark switch                    */
 /* ------------------------------------------------------------------ */
@@ -3478,14 +2773,6 @@ function applyTheme(t) {
   }
 }
 
-
-
-
-
-
-}
-
-/* ------------------------------------------------------------------ */
 /* ------------------------------------------------------------------ */
 /* undo / redo of document changes (server-side snapshot history)      */
 /* ------------------------------------------------------------------ */
@@ -3552,6 +2839,7 @@ document.addEventListener('keydown', ev => {
   isUndo ? doUndo() : doRedo();
 });
 
+/* ------------------------------------------------------------------ */
 /* doc lifecycle: apply + websocket live reload                        */
 /* ------------------------------------------------------------------ */
 

@@ -188,7 +188,6 @@ class Store:
                 raise ConflictError(f'block {bid} no longer matches on disk')
             self._write_and_rebuild(b['file'], nt, 'delete block')
 
-
     @staticmethod
     def _level(x):
         if x['type'] != 'section':
