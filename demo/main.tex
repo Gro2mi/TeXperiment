@@ -7,6 +7,8 @@
 \author{Markus}
 \date{\today}
 
+\newenvironment{mycustomenv}{\begin{quote}\itshape}{\end{quote}}
+
 \begin{document}
 
 \maketitle
@@ -17,8 +19,9 @@
 \section{Introduction}
 
 Welcome to the live LaTeX editor demo. This document is split across
-multiple files with \textbf{\input} and \textbf{\include}, exactly like
-a real project. Double-click any paragraph, formula or table to edit it.
+multiple files with \texttt{\textbackslash input} and
+\texttt{\textbackslash include}, exactly like a real project.
+Double-click any paragraph, formula or table to edit it.
 Your changes are written straight back into the \texttt{.tex} files ---
 no compile step, no round trip to a PDF viewer.
 

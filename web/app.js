@@ -621,6 +621,7 @@ function renderSidebar() {
   }
   const has = !!state.project;
   $('#projdel').disabled = !has;
+  $('#projcompile').disabled = !has;
 
   const fl = $('#filelist');
   fl.innerHTML = '';
@@ -1197,6 +1198,7 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
 /* ------------------------------------------------------------------ */
 
 const TEMPLATES = [
+  ['Raw LaTeX', '% raw LaTeX — replace me'],
   ['Paragraph', 'New paragraph text. Edit me.'],
   ['Display equation', '\\[\ne^{i\\pi} = -1\n\\]'],
   ['Itemized list', '\\begin{itemize}\n\\item First point\n\\item Second point\n\\end{itemize}'],
@@ -1337,6 +1339,51 @@ async function removeProject() {
     await refreshProjects();
     toast('Project removed');
   } catch (e) { toast('Remove failed: ' + e.message, true); }
+}
+
+/* ------------------------------------------------------------------ */
+/* LaTeX compilation                                                   */
+/* ------------------------------------------------------------------ */
+
+async function compileProject() {
+  if (!state.project) return;
+  const btn = $('#projcompile');
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const res = await ppost('/compile', {});
+    window.open(res.pdf + '?t=' + Date.now(), '_blank');
+    if (res.clean === false && res.log) {
+      showCompileLog('The PDF was produced, but LaTeX reported problems:\n\n' + res.log);
+    } else {
+      toast('PDF compiled');
+    }
+  } catch (e) {
+    showCompileLog(e.message);
+  } finally {
+    btn.disabled = !state.project;
+    btn.textContent = 'PDF';
+  }
+}
+
+function showCompileLog(msg) {
+  const old = $('#compilelog');
+  if (old) old.remove();
+  const overlay = el('div');
+  overlay.id = 'compilelog';
+  const wrap = el('div', 'rawwrap');
+  wrap.append(el('h3', '', 'Compilation failed'));
+  const pre = el('pre', 'compilelogpre', esc(msg));
+  wrap.append(pre);
+  const bar = el('div', 'edbar');
+  const closeBtn = el('button', 'edbtn', 'Close');
+  bar.append(el('span', 'spacer'), closeBtn);
+  wrap.append(bar);
+  overlay.append(wrap);
+  document.body.append(overlay);
+  const close = () => overlay.remove();
+  closeBtn.onclick = close;
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
 }
 
 // add project via the built-in disk browser (type/paste a path or navigate)
@@ -1566,6 +1613,7 @@ function setConn(on) {
 window.addEventListener('load', async () => {
   $('#projsel').addEventListener('change', e => switchProject(e.target.value));
   $('#projadd').addEventListener('click', addProject);
+  $('#projcompile').addEventListener('click', compileProject);
   $('#projdel').addEventListener('click', removeProject);
   // MathLive virtual keyboard: reserve space for it and keep the equation
   // in view — driven by every geometry signal MathLive offers, plus a short

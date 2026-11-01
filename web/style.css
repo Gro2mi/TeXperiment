@@ -238,6 +238,14 @@ figure.blkfig { margin: 1em 0; }
 #projbar button:hover { background: #3a424d; color: #fff; }
 #projbar button:disabled { opacity: .35; cursor: default; }
 
+/* compile log */
+.compilelogpre {
+  flex: 1; overflow: auto; background: #1e2126; color: #d5d9df;
+  font-family: var(--mono); font-size: 12px; line-height: 1.45;
+  border-radius: 5px; padding: 12px; white-space: pre-wrap; word-break: break-word;
+  margin: 0;
+}
+
 /* ---------- empty state ---------- */
 .emptystate {
   max-width: 560px; margin: 12vh auto; text-align: center; color: #666;

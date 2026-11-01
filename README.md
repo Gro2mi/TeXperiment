@@ -1,3 +1,5 @@
+# 
+
 # TeXperiment
 
 A realtime, **no-compile** LaTeX content editor. Your document renders in the
@@ -10,10 +12,15 @@ LaTeX preamble where they belong.
 
 ## Quick start
 
+Requirements: installed python, a browser and an internet connection
+
+Optional: LaTeX for PDF compilation, git
+
 ```bash
+git clone https://github.com/Gro2mi/TeXperiment.git
+cd TeXperiment
 pip install -r requirements.txt
-python -m texperiment path/to/main.tex          # --port 8080 (default)
-python -m texperiment main1.tex main2.tex       # open several projects at once
+python -m texperiment
 ```
 
 Open http://127.0.0.1:8080 — or try the bundled demo:
@@ -57,6 +64,14 @@ reload and editing apply to whichever project is selected.
   edit in your other editor and the preview follows; blocks that changed on
   disk get a light highlight until you edit again. If a file changes on disk
   while you have unsaved edits, the editor warns instead of clobbering.
+
+## Compiling the real PDF
+
+The **PDF** button in the sidebar compiles the current project with latexmk
+(fallback: pdflatex) and opens the resulting PDF in a new browser tab. A
+working TeX installation (TeX Live, MiKTeX) must be on your PATH. If LaTeX
+reports problems, the compile log opens in a dialog while a best-effort PDF
+is still served; the editor itself never needs the compile step.
 
 ## Block operations
 

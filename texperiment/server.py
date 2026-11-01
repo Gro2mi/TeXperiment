@@ -1,7 +1,10 @@
 """FastAPI server: multi-project registry, block edit ops, raw file access,
-disk browsing, and per-project WS live reload."""
+disk browsing, LaTeX compilation, and per-project WS live reload."""
 import asyncio
+import json
 import secrets
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -19,6 +22,37 @@ from . import watcher
 WEB_DIR = Path(__file__).resolve().parent.parent / 'web'
 
 NON_EDITABLE = ('preamble', 'enddoc')
+
+# per-port project persistence: ~/.texperiment/projects.json
+CONFIG_DIR = Path.home() / '.texperiment'
+CONFIG_PATH = CONFIG_DIR / 'projects.json'
+
+
+def load_port_projects(port):
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding='utf-8'))
+        return data.get('ports', {}).get(str(port), [])
+    except (OSError, ValueError):
+        return []
+
+
+def save_port_projects(port, projects):
+    records = sorted(
+        ({'path': str(p.store.main_path), 'last_accessed': p.last_accessed}
+         for p in projects.values()),
+        key=lambda r: r['last_accessed'])
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(CONFIG_PATH.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            data = {}
+        data.setdefault('ports', {})[str(port)] = records
+        tmp = CONFIG_PATH.with_suffix('.tmp')
+        tmp.write_text(json.dumps(data, indent=2), encoding='utf-8')
+        tmp.replace(CONFIG_PATH)
+    except OSError:
+        pass  # persistence is best-effort; the editor keeps working
 
 
 class Store:
@@ -200,7 +234,7 @@ class AddProjectBody(BaseModel):
     path: str
 
 
-def create_app(initial_mains=()):
+def create_app(initial_mains=(), port=8080):
     app = FastAPI(title='texperiment')
     projects = {}          # pid -> Project
     clients = set()        # websockets
@@ -227,9 +261,12 @@ def create_app(initial_mains=()):
         p.touch()  # every real access bumps the recency used for ordering
         return p
 
-    def add_project(main_tex) -> Project:
+    def add_project(main_tex, last_accessed=None) -> Project:
         proj = Project(main_tex)
+        if last_accessed is not None:
+            proj.last_accessed = last_accessed
         projects[proj.id] = proj
+        save_port_projects(port, projects)
         return proj
 
     for m in initial_mains:
@@ -237,6 +274,16 @@ def create_app(initial_mains=()):
             add_project(m)
         except (FileNotFoundError, ValueError) as e:
             print(f'! skipping {m}: {e}')
+
+    # restore the projects persisted for this port (skip already-open ones)
+    known = {str(p.store.main_path) for p in projects.values()}
+    for rec in load_port_projects(port):
+        if rec.get('path') in known:
+            continue
+        try:
+            add_project(rec['path'], rec.get('last_accessed'))
+        except (FileNotFoundError, ValueError) as e:
+            print(f'! not restoring {rec.get("path")}: {e}')
 
     def watch_project(proj: Project):
         def should_process(path):
@@ -288,6 +335,7 @@ def create_app(initial_mains=()):
     def remove_project(pid: str):
         get_project(pid)
         del projects[pid]
+        save_port_projects(port, projects)
         return {'ok': True}
 
     # -- disk browser (add project from the UI) --------------------------------
@@ -352,6 +400,60 @@ def create_app(initial_mains=()):
     def put_file(pid: str, body: FileBody):
         _run(get_project(pid).store.raw_put, body.path, body.source)
         return {'ok': True, 'doc': get_project(pid).store.doc}
+
+    # -- LaTeX compilation -------------------------------------------------------
+    @app.post('/api/project/{pid}/compile')
+    def compile_project(pid: str):
+        proj = get_project(pid)
+        root = proj.store.root
+        main_name = proj.store.main_path.name
+        if shutil.which('latexmk'):
+            # -f: force past recorded errors from earlier runs — we serve the
+            # best-effort PDF together with the log instead of refusing
+            cmd = ['latexmk', '-pdf', '-f', '-interaction=nonstopmode', main_name]
+        elif shutil.which('pdflatex'):
+            cmd = ['pdflatex', '-interaction=nonstopmode', '-halt-on-error', main_name]
+        else:
+            raise HTTPException(400,
+                'No TeX toolchain found — install TeX Live or MiKTeX '
+                '(needs latexmk or pdflatex on PATH).')
+        try:
+            proc = subprocess.run(cmd, cwd=str(root), capture_output=True,
+                                  text=True, encoding='utf-8',
+                                  errors='replace', timeout=300)
+            if cmd[0] == 'pdflatex' and proc.returncode == 0:
+                # second pass for cross references
+                subprocess.run(cmd, cwd=str(root), capture_output=True,
+                               text=True, encoding='utf-8',
+                               errors='replace', timeout=300)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(500, 'Compilation timed out after 300 s.')
+        except OSError as e:
+            raise HTTPException(500, f'Could not run {cmd[0]}: {e}')
+        pdf = proj.store.main_path.with_suffix('.pdf')
+        tail = '\n'.join((proc.stdout or '').splitlines()[-40:])
+        # latexmk can exit non-zero while still producing a PDF (best-effort
+        # with -f), or report "nothing to do" for an up-to-date PDF — serve
+        # it together with the log; only fail when there is no PDF at all
+        if proc.returncode == 0:
+            clean, log = True, None
+        else:
+            clean, log = False, tail
+        if not pdf.exists():
+            err = ((proc.stderr or '') + '\n' + tail).strip()
+            raise HTTPException(500, 'Compilation failed:\n'
+                                + (err or f'exit code {proc.returncode}'))
+        return {'ok': True, 'pdf': f'/api/project/{pid}/pdf',
+                'clean': clean, 'log': log}
+
+    @app.get('/api/project/{pid}/pdf')
+    def project_pdf(pid: str):
+        proj = get_project(pid)
+        pdf = proj.store.main_path.with_suffix('.pdf')
+        if not pdf.exists():
+            raise HTTPException(404, 'No PDF yet — compile first.')
+        return FileResponse(str(pdf), media_type='application/pdf',
+                            headers={'Cache-Control': 'no-store'})
 
     # -- project images (\includegraphics) ---------------------------------------
     @app.get('/files/{pid}/{rel:path}')
