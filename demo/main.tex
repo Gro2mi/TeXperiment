@@ -1,0 +1,35 @@
+\documentclass[a4paper,11pt]{article}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+
+\title{The Live Editor Demo}
+\author{Markus}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+% This preamble is shown read-only in the content view.
+% Edit it through the raw file mode in the sidebar.
+
+\section{Introduction}
+
+Welcome to the live LaTeX editor demo. This document is split across
+multiple files with \textbf{\input} and \textbf{\include}, exactly like
+a real project. Double-click any paragraph, formula or table to edit it.
+Your changes are written straight back into the \texttt{.tex} files ---
+no compile step, no round trip to a PDF viewer.
+
+The editor understands sectioning, paragraphs, inline math like
+$e = mc^2$ and $\alpha \beta \gamma$, display formulas, lists, tables
+and figures. Everything it does not render natively shows up as a
+visible chip instead of silently disappearing.\footnote{Footnotes
+render inline in gray parentheses.}
+
+\input{chapters/ch1}
+
+\include{chapters/ch2}
+
+\end{document}

@@ -1,0 +1,40 @@
+Chapter two arrives via \texttt{\textbackslash include} and lives in
+\texttt{chapters/ch2.tex}. It exercises tables and figures.
+
+\subsection{Tables}
+
+A plain tabular block, editable as a grid:
+
+\begin{tabular}{ll}
+Element & Symbol \\
+Hydrogen & H \\
+Helium & He \\
+Lithium & Li \\
+\end{tabular}
+
+A booktabs table with rules is edited as source with a live preview:
+
+\begin{tabular}{lrr}
+\toprule
+Planet & Mass & Radius \\
+\midrule
+Earth & 1.00 & 6371 \\
+Mars & 0.11 & 3390 \\
+\bottomrule
+\end{tabular}
+
+\subsection{Figures}
+
+\begin{figure}
+  \centering
+  \includegraphics[width=0.5\textwidth]{figures/plot.png}
+  \caption{A generated placeholder figure served from the project directory.}
+\end{figure}
+
+\subsection{Something exotic}
+
+Environments the editor does not know are kept safe and visible:
+
+\begin{mycustomenv}
+  Nothing here is lost --- edit this block as raw source.
+\end{mycustomenv}
