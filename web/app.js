@@ -779,6 +779,7 @@ function toggleCollapse(b) {
 }
 
 function renderContent() {
+  closeOrphanAutocomplete(); // rebuilt editors leave no blur behind
   const c = $('#content');
   c.innerHTML = '';
   if (!state.doc) {
@@ -1037,6 +1038,7 @@ function closeEditor() {
   const b = blockById(state.edit.id);
   state.edit = null;
   if (b) rerenderBlock(b);
+  closeOrphanAutocomplete(); // popups die with their editor (no blur event)
 }
 
 function openEditor(b) {
@@ -1053,9 +1055,11 @@ function openEditor(b) {
   node.classList.add('editing');
   node.querySelector('.bcontent').replaceWith(ed.root);
   state.edit = {id: b.id, kind, original: b.source, root: ed, block: b};
-  // Esc always closes the open editor, whatever has focus
+  // Esc always closes the open editor, whatever has focus — unless an
+  // autocomplete popup is open, then Esc closes just the popup
   state._escHandler = ev => {
     if (ev.key === 'Escape') {
+      if (document.querySelector('.acpopup')) return;
       ev.stopPropagation();
       ev.preventDefault();
       closeEditor();
@@ -1063,6 +1067,267 @@ function openEditor(b) {
   };
   document.addEventListener('keydown', state._escHandler, true);
   ed.focus();
+}
+
+// soften lines longer than 120 chars: wrap at the last space before the
+// limit; lines without a space (URLs, long math) are left untouched, and
+// nothing is ever joined — comment lines are never broken (a bare \n would
+// end the comment)
+function reflowLongLines(src, limit = 120) {
+  return src.split('\n').map(line => {
+    if (line.length <= limit || line.trimStart().startsWith('%')) return line;
+    let out = '';
+    let rest = line;
+    while (rest.length > limit) {
+      const cut = rest.lastIndexOf(' ', limit);
+      if (cut <= 0) break; // no usable space — leave the rest as is
+      out += rest.slice(0, cut) + '\n';
+      rest = rest.slice(cut + 1);
+    }
+    return out + rest;
+  }).join('\n');
+}
+
+/* ------------------------------------------------------------------ */
+/* autocomplete: citation keys + \ref/\eqref/\label targets            */
+/* ------------------------------------------------------------------ */
+
+// anchored to the end only: the command must sit directly before the '{'
+const AC_CITE_RE = /\\(?:cite[a-zA-Z]*|Cite[pt])\*?(?:\[[^\]]*\])*$/;
+const AC_REF_RE = /\\(?:ref|eqref|cref|Cref|autoref|pageref|label)\*?$/;
+
+// the most common commands, ordered by usefulness; insert uses '|' as the
+// caret marker after insertion
+const AC_COMMANDS = [
+  {t: 'section', i: '\\section{|}', c: 'structure'},
+  {t: 'subsection', i: '\\subsection{|}', c: 'structure'},
+  {t: 'subsubsection', i: '\\subsubsection{|}', c: 'structure'},
+  {t: 'paragraph', i: '\\paragraph{|}', c: 'structure'},
+  {t: 'citep', i: '\\citep{|}', c: 'citation'},
+  {t: 'citet', i: '\\citet{|}', c: 'citation'},
+  {t: 'cite', i: '\\cite{|}', c: 'citation'},
+  {t: 'citealp', i: '\\citealp{|}', c: 'citation'},
+  {t: 'citeauthor', i: '\\citeauthor{|}', c: 'citation'},
+  {t: 'citeyear', i: '\\citeyear{|}', c: 'citation'},
+  {t: 'ref', i: '\\ref{|}', c: 'reference'},
+  {t: 'eqref', i: '\\eqref{|}', c: 'reference'},
+  {t: 'cref', i: '\\cref{|}', c: 'reference'},
+  {t: 'label', i: '\\label{|}', c: 'reference'},
+  {t: 'footnote', i: '\\footnote{|}', c: 'text'},
+  {t: 'textbf', i: '\\textbf{|}', c: 'text'},
+  {t: 'textit', i: '\\textit{|}', c: 'text'},
+  {t: 'emph', i: '\\emph{|}', c: 'text'},
+  {t: 'underline', i: '\\underline{|}', c: 'text'},
+  {t: 'texttt', i: '\\texttt{|}', c: 'text'},
+  {t: 'caption', i: '\\caption{|}', c: 'floats'},
+  {t: 'includegraphics', i: '\\includegraphics[width=0.8\\textwidth]{|}', c: 'floats'},
+  {t: 'item', i: '\\item ', c: 'lists'},
+  {t: 'begin{itemize}', i: '\\begin{itemize}\n  \\item |\n\\end{itemize}', c: 'environment'},
+  {t: 'begin{enumerate}', i: '\\begin{enumerate}\n  \\item |\n\\end{enumerate}', c: 'environment'},
+  {t: 'begin{equation}', i: '\\begin{equation}\n  |\n  \\label{eq:}\n\\end{equation}', c: 'environment'},
+  {t: 'begin{align}', i: '\\begin{align}\n  | &= \\\\\n  &=\n\\end{align}', c: 'environment'},
+  {t: 'begin{figure}', i: '\\begin{figure}\n  \\centering\n  \\includegraphics[width=0.8\\textwidth]{|}\n  \\caption{}\n\\end{figure}', c: 'environment'},
+  {t: 'begin{table}', i: '\\begin{table}\n  \\caption{|}\n  \\begin{tabular}{ll}\n    a & b \\\\\n  \\end{tabular}\n\\end{table}', c: 'environment'},
+  {t: 'usepackage', i: '\\usepackage{|}', c: 'preamble'},
+  {t: 'input', i: '\\input{|}', c: 'preamble'},
+  {t: 'bibliography', i: '\\bibliography{|}', c: 'preamble'},
+];
+
+// what is being typed at the caret? returns {kind, typed} or null
+function acContext(ta) {
+  const pos = ta.selectionStart;
+  const before = ta.value.slice(0, pos);
+  // 1) inside the braces of a cite/ref-type command → key completion
+  const brace = before.lastIndexOf('{');
+  if (brace >= 0) {
+    const partial = before.slice(brace + 1);
+    if (!/[{}]/.test(partial)) {
+      const cmd = before.slice(0, brace);
+      const typed = partial.slice(partial.lastIndexOf(',') + 1).trimStart();
+      if (AC_CITE_RE.test(cmd)) return {kind: 'cite', typed};
+      if (AC_REF_RE.test(cmd)) return {kind: 'ref', typed};
+    }
+  }
+  // 2) a (partial) command name → command completion; a backslash directly
+  //    behind another backslash is an escaped \\ line break, not a command
+  const m = /\\([a-zA-Z]*)$/.exec(before);
+  if (m && !(m.index > 0 && before[m.index - 1] === '\\')) {
+    return {kind: 'cmd', typed: m[1].toLowerCase(), start: m.index};
+  }
+  return null;
+}
+
+// suggestion items for the current context, filtered by the typed text
+function acSuggestions(kind, typed) {
+  const t = typed.toLowerCase();
+  if (kind === 'cmd') {
+    return AC_COMMANDS.filter(c => c.t.startsWith(t))
+      .slice(0, 12)
+      .map(c => ({insert: c.i, title: '\\' + c.t, sub: c.c}));
+  }
+  let items = [];
+  if (kind === 'cite') {
+    if (state.bib && state.bib.available) {
+      items = state.bib.entries.map(e => ({
+        insert: e.key,
+        title: e.key,
+        sub: [e.authors, e.year].filter(Boolean).join(', ') +
+          (e.plain ? ' — ' + e.plain.slice(0, 90) : ''),
+      }));
+    } else {
+      // no compiled .bbl — offer the keys already cited in the document
+      const used = new Set();
+      for (const b of state.doc.blocks) {
+        const re = /\\cite[a-zA-Z]*\*?(?:\[[^\]]*\])*\{([^{}]+)\}/g;
+        let m;
+        while ((m = re.exec(b.source))) {
+          m[1].split(',').forEach(k => used.add(k.trim()));
+        }
+      }
+      items = [...used].filter(Boolean)
+        .map(k => ({insert: k, title: k, sub: 'already cited in document'}));
+    }
+  } else {
+    const typeNames = {math: 'equation', figure: 'figure', table: 'table'};
+    const seen = new Set();
+    for (const b of state.doc.blocks) {
+      const re = /\\label\{([^{}]+)\}/g;
+      let m;
+      while ((m = re.exec(b.source))) {
+        const label = m[1];
+        if (seen.has(label)) continue;
+        seen.add(label);
+        const sub = b.type === 'section'
+          ? 'section — ' + ((b.meta && b.meta.title) || '')
+          : (typeNames[b.type] || b.type) + ' in ' + b.file;
+        items.push({insert: label, title: label, sub});
+      }
+    }
+  }
+  return items.filter(i => i.title.toLowerCase().includes(t)).slice(0, 12);
+}
+
+// live autocomplete popups → their textareas; a popup whose editor left the
+// DOM (re-render without blur) would otherwise linger forever
+const _acPops = new Map();
+
+function closeOrphanAutocomplete() {
+  for (const [pop, ta] of [..._acPops]) {
+    if (!ta.isConnected) {
+      pop.remove();
+      _acPops.delete(pop);
+    }
+  }
+}
+
+// caret-anchored completion popup for a plain textarea; keyboard: ↑↓ select,
+// Enter/Tab insert, Esc close — Esc does not reach other handlers while open
+function attachAutocomplete(ta) {
+  let pop = null, items = [], sel = 0;
+
+  const close = () => {
+    if (pop) { pop.remove(); _acPops.delete(pop); pop = null; }
+  };
+
+  const render = () => {
+    pop.innerHTML = '';
+    items.forEach((it, ix) => {
+      const row = el('button', 'acitem' + (ix === sel ? ' sel' : ''));
+      row.type = 'button';
+      row.innerHTML = `<span class="actitle">${esc(it.title)}</span>` +
+        (it.sub ? `<span class="acsub">${esc(it.sub)}</span>` : '');
+      row.onmousedown = ev => { ev.preventDefault(); choose(ix); };
+      pop.append(row);
+    });
+  };
+
+  const choose = ix => {
+    const it = items[ix];
+    if (!it) { close(); return; }
+    const pos = ta.selectionStart;
+    const c = acContext(ta);
+    let start = pos;
+    if (c && c.kind === 'cmd') {
+      start = c.start; // replace the whole partial command incl. backslash
+    } else {
+      const before = ta.value.slice(0, pos);
+      const brace = before.lastIndexOf('{');
+      const partial = before.slice(brace + 1);
+      start = brace + 1 + partial.lastIndexOf(',') + 1;
+    }
+    const marker = it.insert.indexOf('|');
+    const text = marker >= 0 ? it.insert.replace('|', '') : it.insert;
+    ta.setRangeText(text, start, pos, 'end');
+    if (marker >= 0) ta.setSelectionRange(start + marker, start + marker);
+    close();
+    ta.dispatchEvent(new Event('input', {bubbles: true})); // refresh preview
+    ta.focus();
+  };
+
+  // caret position via a mirror div with the textarea's exact typography
+  const position = () => {
+    const cs = getComputedStyle(ta);
+    const div = document.createElement('div');
+    for (const p of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight',
+      'padding', 'border', 'letterSpacing', 'boxSizing', 'tabSize']) {
+      div.style[p] = cs[p];
+    }
+    div.style.position = 'absolute';
+    div.style.visibility = 'hidden';
+    div.style.whiteSpace = 'pre-wrap';
+    div.style.wordWrap = 'break-word';
+    div.style.width = ta.clientWidth + 'px';
+    document.body.append(div);
+    div.textContent = ta.value.slice(0, ta.selectionStart);
+    const marker = document.createElement('span');
+    marker.textContent = '\u200b';
+    div.append(marker);
+    const taRect = ta.getBoundingClientRect();
+    const mr = marker.getBoundingClientRect();
+    const dr = div.getBoundingClientRect();
+    let left = taRect.left + (mr.left - dr.left);
+    let top = taRect.top + (mr.top - dr.top) + parseFloat(cs.lineHeight || '20');
+    left = Math.min(left, window.innerWidth - 300);
+    pop.style.left = (left + window.scrollX) + 'px';
+    pop.style.top = (top + window.scrollY) + 'px';
+    div.remove();
+  };
+
+  const update = () => {
+    const c = acContext(ta);
+    items = c ? acSuggestions(c.kind, c.typed) : [];
+    if (!items.length) { close(); return; }
+    sel = 0;
+    if (!pop) {
+      pop = el('div', 'acpopup');
+      document.body.append(pop);
+      _acPops.set(pop, ta);
+    }
+    render();
+    position();
+  };
+
+  ta.addEventListener('input', update);
+  ta.addEventListener('click', update);
+  ta.addEventListener('keydown', e => {
+    if (!pop) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      const d = e.key === 'ArrowDown' ? 1 : -1;
+      sel = (sel + d + items.length) % items.length;
+      render();
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      e.stopPropagation();
+      choose(sel);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
+  }, true);
+  ta.addEventListener('blur', () => setTimeout(close, 150));
 }
 
 function buildEditor(b, kind) {
@@ -1099,6 +1364,7 @@ function buildEditor(b, kind) {
     ta.value = b.source;
     ta.rows = Math.min(Math.max(b.source.split('\n').length + 1, 3), 24);
     ta.spellcheck = false;
+    attachAutocomplete(ta); // cite keys + \ref/\label targets
     ed.root.append(ta);
     const prev = el('div', 'edpreview');
     const upd = () => { prev.innerHTML = renderBlockContent({...b, source: ta.value}); };
@@ -1365,6 +1631,7 @@ async function openRaw(path) {
   const ta = el('textarea');
   ta.value = data.source;
   ta.spellcheck = false;
+  attachAutocomplete(ta); // cite keys + \ref/\label targets
   wrap.append(ta);
   const bar = el('div', 'edbar');
   const closeBtn = el('button', 'edbtn', 'Close');
