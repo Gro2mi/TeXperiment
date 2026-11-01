@@ -161,17 +161,81 @@ function readGroup(s, pos) {
 function katexSpan(tex, display) {
   if (typeof katex === 'undefined') return `<code class="kerr">${esc(tex)}</code>`;
   try {
-    return katex.renderToString(tex, {displayMode: display, throwOnError: true});
+    return katex.renderToString(tex,
+      {displayMode: display, throwOnError: true, output: 'html'});
   } catch (e) {
     try {
-      return katex.renderToString(tex, {displayMode: display, throwOnError: false});
+      return katex.renderToString(tex,
+        {displayMode: display, throwOnError: false, output: 'html'});
     } catch (e2) {
       return `<code class="kerr">${esc(tex)}</code>`;
     }
   }
 }
 
-function renderInline(src) {
+// proof marks [s,e) in a block's source — the squiggle spans for rendering
+function proofMarksFor(b) {
+  if (!state.proof || !state.proof.issues.length) return [];
+  return state.proof.issues.filter(i => i.block_id === b.id)
+    .map(i => [i.start, i.end]).sort((a, c) => a[0] - c[0]);
+}
+
+// shift marks from block-source coordinates into a sub-string that starts
+// at srcOffset and has length len (used for titles, list items, captions)
+function shiftMarks(marks, srcOffset, len) {
+  if (!marks || !marks.length) return [];
+  return marks
+    .filter(m => m[1] > srcOffset && m[0] < srcOffset + len)
+    .map(m => [Math.max(0, m[0] - srcOffset), Math.min(len, m[1] - srcOffset)]);
+}
+
+// resolved citation display from the parsed .bbl — shows what LaTeX typesets.
+// Returns null when the bibliography is unknown or a key is missing, so the
+// caller falls back to the raw-source chip
+function renderCitation(cmd, opts, keys) {
+  const bib = state.bib;
+  if (!bib || !bib.available || !keys.length) return null;
+  const byKey = new Map(bib.entries.map(e => [e.key, e]));
+  const es = keys.map(k => byKey.get(k));
+  if (es.some(e => !e)) return null;
+  const low = cmd.toLowerCase();
+  const kind = (low.replace(/^cite/, '').replace(/\*$/, '') || 'p');
+  const wrap = s => `<span class="citeref" data-keys="${esc(keys.join(','))}">${s}</span>`;
+  let html;
+  if (bib.style === 'numeric') {
+    const nums = es.map(e => String(e.num)).join(', ');
+    if (kind === 'year') html = esc(nums);
+    else if (kind === 'yearpar') html = '(' + esc(nums) + ')';
+    else {
+      html = (opts[0] ? esc(opts[0]) + ' ' : '') + '[' + esc(nums) + ']' +
+        (opts[1] ? ' ' + esc(opts[1]) : '');
+    }
+  } else {
+    const ap = es.map(e => ({
+      a: esc(e.authors || '?'), y: esc(e.year || 'n.d.'),
+    }));
+    if (kind === 'year') html = ap.map(x => x.y).join(', ');
+    else if (kind === 'yearpar') html = '(' + ap.map(x => x.y).join(', ') + ')';
+    else if (kind === 'author') html = ap.map(x => x.a).join('; ');
+    else if (kind === 'alp' || kind === 'alt') {
+      html = ap.map(x => x.a + ' ' + x.y).join('; ');
+    } else if (kind === 't') {
+      html = ap.map(x => x.a + ' (' + x.y + ')').join('; ');
+      if (opts[0]) html = esc(opts[0]) + ' ' + html;
+      if (opts[1]) html += ' ' + esc(opts[1]);
+    } else { // citep, cite, citeonline
+      const inner = ap.map(x => x.a + ', ' + x.y).join('; ');
+      html = '(' + (opts[0] ? esc(opts[0]) + ' ' : '') + inner +
+        (opts[1] ? ', ' + esc(opts[1]) : '') + ')';
+    }
+    if (cmd[0] === 'C') html = html.charAt(0).toUpperCase() + html.slice(1);
+  }
+  return wrap(html);
+}
+
+function renderInline(src, marks) {
+  marks = marks || [];
+  let mi = 0;
   let out = '';
   let i = 0;
   const n = src.length;
@@ -3601,39 +3665,64 @@ function setConn(on) {
 /* boot                                                                */
 /* ------------------------------------------------------------------ */
 
-window.addEventListener('load', async () => {
-  $('#projsel').addEventListener('change', e => switchProject(e.target.value));
-  $('#projadd').addEventListener('click', addProject);
-  $('#projcompile').addEventListener('click', compileProject);
-  $('#projdel').addEventListener('click', removeProject);
-  // MathLive virtual keyboard: reserve space for it and keep the equation
-  // in view — driven by every geometry signal MathLive offers, plus a short
-  // poll after editor open, so animation/late-layout can't miss it
-  if (window.mathVirtualKeyboard) {
-    const keyboardHeight = () => {
-      const vk = window.mathVirtualKeyboard;
-      if (!vk || !vk.visible) return 0;
-      if (vk.boundingRect && vk.boundingRect.height > 0) return vk.boundingRect.height;
-      if (typeof vk.height === 'number' && vk.height > 0) return vk.height;
-      return 0;
-    };
-    const syncKeyboardSpace = () => {
-      const h = keyboardHeight();
-      const content = $('#content');
-      content.style.paddingBottom = h > 0 ? (h + 24) + 'px' : '';
-      if (h > 0 && state.edit) {
-        const mf = state.edit.root.root.querySelector('math-field');
-        if (mf && mf.offsetParent !== null) {
-          mf.scrollIntoView({block: 'center', behavior: 'smooth'});
-        }
+// MathLive virtual keyboard: reserve space for it and keep the equation
+// in view — driven by every geometry signal MathLive offers, plus a short
+// poll after editor open, so animation/late-layout can't miss it
+function wireMathKeyboard() {
+  if (window._kbWired || !window.mathVirtualKeyboard) return;
+  window._kbWired = true;
+  const keyboardHeight = () => {
+    const vk = window.mathVirtualKeyboard;
+    if (!vk || !vk.visible) return 0;
+    if (vk.boundingRect && vk.boundingRect.height > 0) return vk.boundingRect.height;
+    if (typeof vk.height === 'number' && vk.height > 0) return vk.height;
+    return 0;
+  };
+  const syncKeyboardSpace = () => {
+    const h = keyboardHeight();
+    const content = $('#content');
+    content.style.paddingBottom = h > 0 ? (h + 24) + 'px' : '';
+    if (h > 0 && state.edit) {
+      const mf = state.edit.root.root.querySelector('math-field');
+      if (mf && mf.offsetParent !== null) {
+        mf.scrollIntoView({block: 'center', behavior: 'smooth'});
       }
-    };
-    ['geometrychange', 'virtual-keyboard-toggle'].forEach(evName => {
-      try { window.mathVirtualKeyboard.addEventListener(evName, syncKeyboardSpace); }
-      catch (e) { /* older MathLive without this event */ }
-    });
-    window._syncKeyboardSpace = syncKeyboardSpace;
-  }
+    }
+  };
+  ['geometrychange', 'virtual-keyboard-toggle'].forEach(evName => {
+    try { window.mathVirtualKeyboard.addEventListener(evName, syncKeyboardSpace); }
+    catch (e) { /* older MathLive without this event */ }
+  });
+  window._syncKeyboardSpace = syncKeyboardSpace;
+}
+
+// CDN math libs load async — once KaTeX arrives, math blocks rendered in
+// the meantime need one re-render; MathLive's custom element upgrades itself
+function watchMathLibs() {
+  let katexApplied = typeof katex !== 'undefined';
+  let mlWired = !!customElements.get('math-field');
+  if (katexApplied && mlWired) return;
+  const libWait = setInterval(() => {
+    if (!katexApplied && typeof katex !== 'undefined') {
+      katexApplied = true;
+      if (state.doc) renderAll();
+    }
+    if (!mlWired && customElements.get('math-field')) {
+      mlWired = true;
+      wireMathKeyboard();
+    }
+    if (katexApplied && mlWired) clearInterval(libWait);
+  }, 250);
+  setTimeout(() => clearInterval(libWait), 30000);
+}
+
+// connect the live socket first — the status pill must not wait for
+// project loading or CDN math libs
+connectWS();
+
+(async () => {
+  $('#projadd').addEventListener('click', addProject);
+  wireMathKeyboard();
   // collapsible sidebar groups (remembered across sessions)
   const setupToggle = (headId, listId, key) => {
     const head = document.getElementById(headId);
@@ -3666,5 +3755,15 @@ window.addEventListener('load', async () => {
     state.projects = await api('/api/projects');
   } catch (e) { /* server error shown via refresh */ }
   await refreshProjects();
-  connectWS();
-});
+  refreshGit();
+  loadProofConfig();
+  refreshBib();
+  initProofHover();
+  watchMathLibs();
+  $('#undobtn').addEventListener('click', doUndo);
+  $('#redobtn').addEventListener('click', doRedo);
+  $('#themebtn').addEventListener('click', () =>
+    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+  applyTheme(localStorage.getItem('theme') || 'dark');
+  syncHistoryButtons();
+})();
