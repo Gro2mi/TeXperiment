@@ -2,6 +2,7 @@
 disk browsing, LaTeX compilation, and per-project WS live reload."""
 import asyncio
 import json
+import re
 import secrets
 import shutil
 import subprocess
@@ -17,8 +18,9 @@ from pydantic import BaseModel
 from .parser import parse_file
 from .resolver import read_text_preserve, resolve_files
 from .storage import ConflictError, FileStore, patch
-from . import gitops, watcher
+from . import gitops, proof, watcher
 from .gitops import GitError
+from .proof import ProofError
 
 WEB_DIR = Path(__file__).resolve().parent.parent / 'web'
 
@@ -377,6 +379,8 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         except ConflictError as e:
             raise HTTPException(409, str(e))
         except GitError as e:
+            raise HTTPException(400, str(e))
+        except ProofError as e:
             raise HTTPException(400, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))

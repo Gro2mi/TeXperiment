@@ -20,9 +20,13 @@ def main():
                     help='path(s) to main .tex files to open initially')
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=8080)
+    ap.add_argument('--proof-engine', choices=('languagetool', 'spellcheck'),
+                    default='languagetool',
+                    help='proofreading engine (default: languagetool, needs '
+                         'Java; spellcheck is an offline typo-only fallback)')
     args = ap.parse_args()
 
-    app = create_app(args.main_tex, args.port)
+    app = create_app(args.main_tex, args.port, proof_engine=args.proof_engine)
     url = f'http://{args.host}:{args.port}'
     print(f'* TeXperiment — {len(args.main_tex)} project(s) loaded from CLI, '
           f'restored the rest for port {args.port} from ~/.texperiment/projects.json',

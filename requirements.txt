@@ -1,3 +1,5 @@
 fastapi>=0.110
 uvicorn[standard]>=0.29
 watchdog>=4.0
+language-tool-python>=4.9
+pyspellchecker>=0.8

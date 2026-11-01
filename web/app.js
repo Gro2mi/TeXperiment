@@ -17,6 +17,12 @@ const state = {
   gitChanged: new Set(), // block ids whose content differs from git HEAD
   gitHl: true,       // highlight changed blocks in the document
   gitShowDiff: false, // show only changed blocks
+  proof: {           // proofreading state
+    config: null,    // /proof/config payload (engine availability)
+    issues: [],
+    checking: false,
+    checked: false,
+  },
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -144,7 +150,7 @@ function readGroup(s, pos) {
     if (s[j] === '{') depth++;
     else if (s[j] === '}') {
       depth--;
-      if (!depth) return {body: s.slice(i + 1, j), end: j + 1};
+      if (!depth) return {body: s.slice(i + 1, j), bodyStart: i + 1, end: j + 1};
     }
   }
   return null;
@@ -202,19 +208,19 @@ function renderInline(src) {
         const g = readGroup(src, after);
         if (g) {
           if (cmd === 'footnote') {
-            out += `<sup class="fn" title="footnote">${renderInline(g.body)}</sup>`;
+            out += `<sup class="fn" title="footnote">${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</sup>`;
           } else if (['ref', 'eqref', 'cite', 'label'].includes(cmd)) {
             out += `<span class="chip">${cmd}:${esc(g.body)}</span>`;
           } else if (cmd === 'url') {
             out += `<code>${esc(g.body)}</code>`;
           } else if (cmd === 'textbf') {
-            out += `<strong>${renderInline(g.body)}</strong>`;
+            out += `<strong>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</strong>`;
           } else if (cmd === 'texttt') {
             out += `<code>${esc(g.body)}</code>`;
           } else if (cmd === 'underline') {
-            out += `<u>${renderInline(g.body)}</u>`;
+            out += `<u>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</u>`;
           } else { // textit, emph, text, textrm, mbox
-            out += `<em>${renderInline(g.body)}</em>`;
+            out += `<em>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</em>`;
           }
           i = g.end;
           continue;
@@ -233,7 +239,7 @@ function renderInline(src) {
         // \paragraph{Title.} → bold run-in heading followed by the text
         const g = readGroup(src, after);
         if (g) {
-          out += `<strong>${renderInline(g.body)}</strong> `;
+          out += `<strong>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</strong> `;
           i = g.end;
           continue;
         }
@@ -296,6 +302,21 @@ function renderInline(src) {
     } else if (c === '&') {
       out += '<span class="chip">&amp;</span>'; i++;
     } else {
+      // plain character — wrap runs inside a proof mark in a squiggle
+      if (marks.length) {
+        while (mi < marks.length && i >= marks[mi][1]) mi++;
+        const mk = marks[mi];
+        if (mk && i >= mk[0] && i < mk[1]) {
+          let run = '';
+          while (i < n && i < mk[1] && src[i] !== '\\' && src[i] !== '$' &&
+                 src[i] !== '%') {
+            run += (src[i] === '\n' || src[i] === '~') ? ' ' : src[i];
+            i++;
+          }
+          out += `<span class="pf-err">${esc(run)}</span>`;
+          continue;
+        }
+      }
       out += esc(c); i++;
     }
   }
@@ -449,9 +470,25 @@ function parseTabularLenient(src) {
   return {grid, caption, labels: mathLabels(src)};
 }
 
-function renderTableHTML(grid) {
+function renderTableHTML(grid, marks, src) {
+  // locate each cell's text sequentially in the block source so proof
+  // squiggles (and the flash) work inside table cells too
+  let cm = null;
+  if (marks && marks.length && src) {
+    const texts = grid.flat();
+    const per = [];
+    let cursor = 0;
+    for (const t of texts) {
+      let off = t ? src.indexOf(t, cursor) : -1;
+      if (off < 0) off = t ? src.indexOf(t) : -1;
+      if (off >= 0) cursor = off + t.length;
+      per.push(off >= 0 ? shiftMarks(marks, off, t.length) : []);
+    }
+    cm = per;
+  }
+  let k = 0;
   const rows = grid.map(r =>
-    `<tr>${r.map(c => `<td>${renderInline(c)}</td>`).join('')}</tr>`).join('');
+    `<tr>${r.map(c => `<td>${renderInline(c, cm ? cm[k++] : [])}</td>`).join('')}</tr>`).join('');
   return `<table class="rtab">${rows}</table>`;
 }
 
@@ -531,10 +568,13 @@ function renderBlockContent(b) {
       // titles may contain math: \section{Index ($\Omega_R$)}
       const collapsed = state.collapsed && state.collapsed.has(b.id);
       const chev = `<button class="collapsebtn" title="${collapsed ? 'Expand' : 'Collapse'} section">${collapsed ? '▸' : '▾'}</button>`;
-      return `<h${lv} class="blk">${chev}${num ? num + ' ' : ''}${renderInline((b.meta && b.meta.title) || '')}</h${lv}>`;
+      const title = (b.meta && b.meta.title) || '';
+      // marks live in block-source coordinates; the title starts after '{'
+      const titleMarks = shiftMarks(proofMarksFor(b), b.source.indexOf('{') + 1, title.length);
+      return `<h${lv} class="blk">${chev}${num ? num + ' ' : ''}${renderInline(title, titleMarks)}</h${lv}>`;
     }
     case 'paragraph':
-      return `<div class="rtext">${renderInline(b.source)}</div>`;
+      return `<div class="rtext">${renderInline(b.source, proofMarksFor(b))}</div>`;
     case 'math': {
       const labels = mathLabels(b.source);
       return `<div class="disp-math">${katexSpan(displayTex(b), true)}` +
@@ -543,18 +583,27 @@ function renderBlockContent(b) {
     }
     case 'list': {
       const isOrd = b.meta && b.meta.env === 'enumerate';
-      const items = listItems(b.source);
+      const marks = proofMarksFor(b);
+      let cursor = 0; // items appear in order — track each item's source offset
+      const items = listItems(b.source).map(it => {
+        let off = b.source.indexOf(it, cursor);
+        if (off < 0) off = b.source.indexOf(it);
+        if (off >= 0) cursor = off + it.length;
+        return `<li>${renderInline(it, off >= 0 ? shiftMarks(marks, off, it.length) : [])}</li>`;
+      });
       const tag = isOrd ? 'ol' : 'ul';
-      return `<${tag} class="rtext">${items.map(it => `<li>${renderInline(it)}</li>`).join('')}</${tag}>`;
+      return `<${tag} class="rtext">${items.join('')}</${tag}>`;
     }
     case 'table': {
       const t = parseTabular(b.source);
-      if (t) return renderTableHTML(t.grid);
+      if (t) return renderTableHTML(t.grid, proofMarksFor(b), b.source);
       const L = parseTabularLenient(b.source);
       if (L) {
+        const cOff = L.caption ? b.source.indexOf(L.caption) : -1;
+        const cMarks = cOff >= 0 ? shiftMarks(proofMarksFor(b), cOff, L.caption.length) : [];
         return `<div class="tabwrap">` +
-          renderTableHTML(L.grid) +
-          (L.caption ? `<figcaption class="figcap">${renderInline(L.caption)}</figcaption>` : '') +
+          renderTableHTML(L.grid, proofMarksFor(b), b.source) +
+          (L.caption ? `<figcaption class="figcap">${renderInline(L.caption, cMarks)}</figcaption>` : '') +
           (L.labels.length ? `<div class="mathlabels">${labelChips(L.labels)}</div>` : '') +
           `<div class="editnote">preview — edit as source for exact layout</div></div>`;
       }
@@ -565,8 +614,10 @@ function renderBlockContent(b) {
       if (!path) return `<div class="figerr">${esc(b.source)}</div>`;
       const img = `<img class="figimg" src="/files/${state.project}/${encodeURI(path)}" ` +
         `data-orig="${esc(path)}" alt="figure">`;
+      const cOff = caption ? b.source.indexOf(caption) : -1;
+      const cMarks = cOff >= 0 ? shiftMarks(proofMarksFor(b), cOff, caption.length) : [];
       return `<figure class="blkfig">${img}` +
-        (caption ? `<figcaption class="figcap">${renderInline(caption)}</figcaption>` : '') +
+        (caption ? `<figcaption class="figcap">${renderInline(caption, cMarks)}</figcaption>` : '') +
         `</figure>`;
     }
     default:
@@ -598,6 +649,7 @@ function renderAll() {
   renderSidebar();
   renderContent();
   renderGit();
+  renderProof();
 }
 
 // document-order section numbering (section → 1, subsection → 1.1, …)
@@ -1022,6 +1074,7 @@ function buildEditor(b, kind) {
       state.edit = null;
       applyDoc(res.doc);
       toast('Saved');
+      checkBlocks([editRef.id]); // background re-check of the edited block
     } catch (e) {
       handleOpError(e, editRef.block);
     }
@@ -1333,6 +1386,7 @@ async function openRaw(path) {
       close();
       applyDoc(res.doc);
       toast('Saved ' + path);
+      checkDocument(); // raw edits can touch any block — full re-check
     } catch (e) { toast('Raw save failed: ' + e.message, true); }
   };
   ta.focus();
@@ -1361,6 +1415,10 @@ function switchProject(pid) {
   state.git = null;
   state.gitChanged = new Set();
   state.gitShowDiff = false;
+  // proof issues are document-specific
+  state.proof.issues = [];
+  state.proof.checked = false;
+  loadProofConfig();
   refreshDoc();
 }
 
@@ -2171,6 +2229,880 @@ async function openGitDiff(path, staged = false) {
 
 }
 
+/* ------------------------------------------------------------------ */
+
+/* proofreading: panel, squiggles, apply suggestion                    */
+
+/* ------------------------------------------------------------------ */
+
+
+
+function proofLang() {
+
+  return localStorage.getItem('proof-lang') || 'en-US';
+
+}
+
+
+
+// issue text is snapshotted at check time so a stale issue (block edited
+
+// since) can be detected before any rewrite is attempted
+
+function pruneProofIssues(doc) {
+
+  if (!state.proof.issues.length) return;
+
+  const byId = new Map(doc.blocks.map(b => [b.id, b]));
+
+  state.proof.issues = state.proof.issues.filter(i => {
+
+    const b = byId.get(i.block_id);
+
+    return b && b.source.slice(i.start, i.end) === i.text;
+
+  });
+
+}
+
+
+
+// parsed bibliography for citation resolution — refreshed on load, project
+
+// switch and after each compile (the .bbl changes there)
+
+async function refreshBib() {
+
+  if (!state.project) { state.bib = null; return; }
+
+  try {
+
+    const res = await papi('/bibliography');
+
+    state.bib = res.available ? res : null;
+
+  } catch (e) { state.bib = null; }
+
+  if (state.doc) rerenderContentPreservingScroll();
+
+}
+
+
+
+async function loadProofConfig() {
+
+  if (!state.project) { state.proof.config = null; renderProof(); return; }
+
+  try { state.proof.config = await papi('/proof/config'); }
+
+  catch (e) {
+
+    state.proof.config = {engine: '?', available: false, error: e.message};
+
+  }
+
+  renderProof();
+
+  // background check when the app (or a project) is opened
+
+  if (state.proof.config.available && !state.proof.checked &&
+
+      !state.proof.checking) {
+
+    checkDocument();
+
+  }
+
+}
+
+
+
+function renderProof() {
+
+  const panel = $('#proofpanel');
+
+  panel.innerHTML = '';
+
+  $('#proofHead').classList.toggle('hidden', !state.project);
+
+  if (!state.project) return;
+
+  const p = state.proof;
+
+
+
+  // controls: language + manual check
+
+  const bar = el('div', 'proofbar');
+
+  const sel = el('select', 'prooflang');
+
+  for (const [code, label] of [['en-US', 'English'], ['de-DE', 'Deutsch']]) {
+
+    const o = el('option', '', label);
+
+    o.value = code;
+
+    if (code === proofLang()) o.selected = true;
+
+    sel.append(o);
+
+  }
+
+  sel.title = 'Language for the proofreading check';
+
+  sel.onchange = () => {
+
+    localStorage.setItem('proof-lang', sel.value);
+
+    state.proof.issues = []; // results are language-specific
+
+    state.proof.checked = false;
+
+    renderProof();
+
+    rerenderContentPreservingScroll();
+
+  };
+
+  const btn = el('button', 'edbtn primary proofcheck',
+
+    p.checking ? 'checking…' : 'Check document');
+
+  btn.disabled = p.checking;
+
+  btn.onclick = checkDocument;
+
+  bar.append(sel, btn);
+
+  panel.append(bar);
+
+
+
+  if (p.config && !p.config.available) {
+
+    panel.append(el('div', 'pferrbox',
+
+      esc(p.config.error || 'proofreading engine unavailable')));
+
+  }
+
+
+
+  if (!p.issues.length) {
+
+    if (p.checked) panel.append(el('div', 'gitmuted', 'No issues found ✓'));
+
+    return;
+
+  }
+
+  panel.append(el('div', 'gitmuted',
+
+    `${p.issues.length} issue${p.issues.length === 1 ? '' : 's'}`));
+
+  // rows in document order
+
+  const order = new Map(state.doc.blocks.map((b, ix) => [b.id, ix]));
+
+  const sorted = [...p.issues].sort((a, b) =>
+
+    (order.get(a.block_id) ?? 1e9) - (order.get(b.block_id) ?? 1e9) ||
+
+    a.start - b.start);
+
+  for (const it of sorted) panel.append(proofRow(it));
+
+}
+
+
+
+function proofRow(it) {
+
+  const row = el('div', 'pfrow');
+
+  row.title = it.file + ' — click to jump to the word';
+
+  row.onclick = () => gotoIssue(it);
+
+  const top = el('div', 'pfrowtop');
+
+  top.append(el('span', 'pfbadge pf-' + esc(it.category || 'grammar'),
+
+    esc(it.category || 'grammar')));
+
+  const word = (it.text || '').replace(/\s+/g, ' ').trim();
+
+  if (word) top.append(el('span', 'pfword', '“' + esc(word) + '”'));
+
+  top.append(el('span', 'spacer'));
+
+  const isMisspell = it.category === 'misspelling' || it.category === 'typo';
+
+  if (isMisspell && it.text) {
+
+    const dict = el('button', 'gbtn', '＋');
+
+    dict.title = `Add “${it.text.trim()}” to the project dictionary`;
+
+    dict.onclick = ev => { ev.stopPropagation(); addToDictionary(it); };
+
+    top.append(dict);
+
+  }
+
+  const x = el('button', 'gbtn', '✕');
+
+  x.title = 'Ignore this case for this project (persisted)';
+
+  x.onclick = ev => {
+
+    ev.stopPropagation();
+
+    ignoreIssue(it);
+
+  };
+
+  top.append(x);
+
+  row.append(top);
+
+  // reason below the kind + word
+
+  const msg = el('div', 'pfmsg', esc(it.message));
+
+  msg.title = it.message; // full text even if the row grows tall
+
+  row.append(msg);
+
+  if (it.replacements && it.replacements.length) {
+
+    const sugg = el('div', 'pfsugg');
+
+    for (const r of it.replacements.slice(0, 4)) {
+
+      const chip = el('button', 'pfchip', esc(r));
+
+      chip.title = 'Replace with “' + r + '”';
+
+      chip.onclick = ev => { ev.stopPropagation(); applyProofFix(it, r); };
+
+      sugg.append(chip);
+
+    }
+
+    row.append(sugg);
+
+  }
+
+  return row;
+
+}
+
+
+
+// the rendered squiggle span of an issue (matched by flagged text)
+
+function issueSpanEl(it) {
+
+  const node = $(`.block[data-id="${it.block_id}"]`);
+
+  if (!node) return null;
+
+  const word = (it.text || '').replace(/\s+/g, ' ').trim();
+
+  if (!word) return null;
+
+  return [...node.querySelectorAll('.pf-err')]
+
+    .find(s => (s.textContent || '').replace(/\s+/g, ' ').trim() === word) || null;
+
+}
+
+
+
+// jump to an issue: scroll only when the word is off-screen, then flash it
+
+function gotoIssue(it) {
+
+  const span = issueSpanEl(it);
+
+  const target = span || $(`.block[data-id="${it.block_id}"]`);
+
+  if (!target) return;
+
+  const r = target.getBoundingClientRect();
+
+  const visible = r.top >= 0 && r.bottom <= window.innerHeight;
+
+  if (!visible) target.scrollIntoView({behavior: 'smooth', block: 'center'});
+
+  setTimeout(() => flashIssueWord(it), visible ? 0 : 650);
+
+}
+
+
+
+// briefly highlight the flagged word itself, not the whole paragraph;
+
+// falls back to the block when the word span isn't rendered (e.g. exotic
+
+// table content that the preview reconstructs)
+
+function flashIssueWord(it) {
+
+  let target = issueSpanEl(it);
+
+  if (!target) target = $(`.block[data-id="${it.block_id}"]`);
+
+  if (!target) return;
+
+  target.classList.remove('pf-flash');
+
+  void target.offsetWidth; // restart the animation if it is already running
+
+  target.classList.add('pf-flash');
+
+  setTimeout(() => target.classList.remove('pf-flash'), 2600);
+
+}
+
+
+
+function dropProofIssue(issue) {
+
+  state.proof.issues = state.proof.issues.filter(o => o !== issue);
+
+  renderProof();
+
+  rerenderContentPreservingScroll();
+
+}
+
+
+
+// re-render the content area without losing the reading position
+
+function rerenderContentPreservingScroll() {
+
+  const content = $('#content');
+
+  const firstVisible = [...document.querySelectorAll('.block')]
+
+    .find(n => n.getBoundingClientRect().bottom > 0);
+
+  const anchorId = firstVisible ? firstVisible.dataset.id : null;
+
+  const prevOffset = anchorId
+
+    ? (document.querySelector(`.block[data-id="${anchorId}"]`) || {}).offsetTop : 0;
+
+  renderContent();
+
+  if (anchorId) {
+
+    const n = document.querySelector(`.block[data-id="${anchorId}"]`);
+
+    if (n) content.scrollTop += n.offsetTop - prevOffset;
+
+  }
+
+}
+
+
+
+async function checkDocument() {
+
+  if (!state.project || state.proof.checking) return;
+
+  state.proof.checking = true;
+
+  renderProof();
+
+  try {
+
+    const res = await ppost('/proof/check', {lang: proofLang()});
+
+    // snapshot the flagged text so staleness can be detected later
+
+    const byId = new Map(state.doc.blocks.map(b => [b.id, b]));
+
+    for (const i of res.issues) {
+
+      const b = byId.get(i.block_id);
+
+      i.text = b ? b.source.slice(i.start, i.end) : '';
+
+    }
+
+    state.proof.issues = mergeIssues([], res.issues);
+
+    state.proof.checked = true;
+
+  } catch (e) {
+
+    toast('Check failed: ' + e.message, true);
+
+  } finally {
+
+    state.proof.checking = false;
+
+    renderProof();
+
+    rerenderContentPreservingScroll();
+
+  }
+
+}
+
+
+
+// re-check only the given blocks (after an edit) and merge into the results
+
+async function checkBlocks(ids) {
+
+  if (!state.project || !ids || !ids.length) return;
+
+  try {
+
+    const res = await ppost('/proof/check',
+
+      {lang: proofLang(), block_ids: ids});
+
+    const byId = new Map(state.doc.blocks.map(b => [b.id, b]));
+
+    for (const i of res.issues) {
+
+      const b = byId.get(i.block_id);
+
+      i.text = b ? b.source.slice(i.start, i.end) : '';
+
+    }
+
+    const idset = new Set(ids);
+
+    const kept = state.proof.issues.filter(i => !idset.has(i.block_id));
+
+    state.proof.issues = mergeIssues(kept, res.issues);
+
+    state.proof.checked = true;
+
+    renderProof();
+
+    rerenderContentPreservingScroll();
+
+  } catch (e) { /* background re-check: stay quiet */ }
+
+}
+
+
+
+// combine issue lists and sort in document order; dictionary words and
+
+// persisted ignored cases are already filtered server-side
+
+function mergeIssues(base, extra) {
+
+  const all = [...base, ...extra];
+
+  const order = new Map(state.doc.blocks.map((b, ix) => [b.id, ix]));
+
+  return all.sort((a, b) =>
+
+    (order.get(a.block_id) ?? 1e9) - (order.get(b.block_id) ?? 1e9) ||
+
+    a.start - b.start);
+
+}
+
+
+
+// ignore key is text-based so it survives offset shifts within a block
+
+function ignoreKey(it) {
+
+  return it.rule_id + '\u0000' + (it.text || '').replace(/\s+/g, ' ').trim();
+
+}
+
+
+
+// persist one ignored case (rule + flagged text) for this project
+
+async function ignoreIssue(issue) {
+
+  try {
+
+    await ppost('/proof/ignore',
+
+      {rule: issue.rule_id, text: (issue.text || '').trim()});
+
+    const key = ignoreKey(issue);
+
+    state.proof.issues = state.proof.issues.filter(i => ignoreKey(i) !== key);
+
+    renderProof();
+
+    rerenderContentPreservingScroll();
+
+    toast('Case ignored for this project — it will not come back on re-checks');
+
+  } catch (e) {
+
+    toast('Ignore failed: ' + e.message, true);
+
+  }
+
+}
+
+
+
+// persist a word for this project and drop every issue for it
+
+async function addToDictionary(issue) {
+
+  const word = (issue.text || '').replace(/\s+/g, ' ').trim();
+
+  if (!word) return;
+
+  try {
+
+    await ppost('/proof/dictionary', {word});
+
+    const w = word.toLowerCase();
+
+    state.proof.issues = state.proof.issues.filter(i =>
+
+      (i.text || '').replace(/\s+/g, ' ').trim().toLowerCase() !== w);
+
+    renderProof();
+
+    rerenderContentPreservingScroll();
+
+    toast(`“${word}” added to the project dictionary`);
+
+  } catch (e) {
+
+    toast('Failed to add word: ' + e.message, true);
+
+  }
+
+}
+
+
+
+/* ---- hover popup on squiggled words ---- */
+
+
+
+let pfPopup = null;
+
+let pfHideTimer = null;
+
+
+
+function hideProofPopup() {
+
+  clearTimeout(pfHideTimer);
+
+  if (pfPopup) { pfPopup.remove(); pfPopup = null; }
+
+}
+
+
+
+function showProofPopup(span) {
+
+  const blockEl = span.closest('.block');
+
+  const word = (span.textContent || '').replace(/\s+/g, ' ').trim();
+
+  if (!blockEl || !word) return;
+
+  const issue = state.proof.issues.find(i =>
+
+    i.block_id === blockEl.dataset.id &&
+
+    (i.text || '').replace(/\s+/g, ' ').trim() === word);
+
+  if (!issue) return;
+
+  hideProofPopup();
+
+  const pop = el('div', 'pfpopup');
+
+  const head = el('div', 'pfpopuphead');
+
+  head.append(el('span', 'pfbadge pf-' + esc(issue.category || 'grammar'),
+
+    esc(issue.category || 'grammar')));
+
+  const x = el('button', 'gbtn', '✕');
+
+  x.title = 'Close';
+
+  x.onclick = hideProofPopup;
+
+  head.append(el('span', 'spacer'), x);
+
+  pop.append(head);
+
+  pop.append(el('div', 'pfpopupmsg', esc(issue.message)));
+
+  if (issue.replacements && issue.replacements.length) {
+
+    const sugg = el('div', 'pfsugg');
+
+    for (const r of issue.replacements.slice(0, 5)) {
+
+      const chip = el('button', 'pfchip', esc(r));
+
+      chip.title = 'Replace with “' + r + '”';
+
+      chip.onclick = () => { hideProofPopup(); applyProofFix(issue, r); };
+
+      sugg.append(chip);
+
+    }
+
+    pop.append(sugg);
+
+  }
+
+  if (issue.category === 'misspelling' || issue.category === 'typo') {
+
+    const dict = el('button', 'pfdict', `＋ Add “${word}” to dictionary`);
+
+    dict.onclick = () => { hideProofPopup(); addToDictionary(issue); };
+
+    pop.append(dict);
+
+  }
+
+  const ign = el('button', 'pfdict', '✕ Ignore this case');
+
+  ign.title = 'Persisted for this project — re-checks will not report it again';
+
+  ign.onclick = () => { hideProofPopup(); ignoreIssue(issue); };
+
+  pop.append(ign);
+
+  document.body.append(pop);
+
+  // place below the squiggled span, clamped to the viewport
+
+  const r = span.getBoundingClientRect();
+
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+
+  let left = r.left + window.scrollX;
+
+  let top = r.bottom + window.scrollY + 4;
+
+  if (left + pw > window.scrollX + document.documentElement.clientWidth - 8) {
+
+    left = window.scrollX + document.documentElement.clientWidth - pw - 8;
+
+  }
+
+  if (top + ph > window.scrollY + window.innerHeight &&
+
+      r.top - ph > 0) {
+
+    top = r.top + window.scrollY - ph - 4; // flip above when near the bottom
+
+  }
+
+  pop.style.left = left + 'px';
+
+  pop.style.top = top + 'px';
+
+  pfPopup = pop;
+
+}
+
+
+
+function showCitePopup(span) {
+
+  const keys = (span.dataset.keys || '').split(',').map(s => s.trim()).filter(Boolean);
+
+  const bib = state.bib;
+
+  if (!bib || !bib.available || !keys.length) return;
+
+  const byKey = new Map(bib.entries.map(e => [e.key, e]));
+
+  hideProofPopup();
+
+  const pop = el('div', 'pfpopup citepopup');
+
+  const head = el('div', 'pfpopuphead');
+
+  head.append(el('span', 'pfbadge', 'reference' +
+
+    (keys.length > 1 ? 's' : '')));
+
+  head.append(el('span', 'spacer'));
+
+  const x = el('button', 'gbtn', '✕');
+
+  x.title = 'Close';
+
+  x.onclick = hideProofPopup;
+
+  head.append(x);
+
+  pop.append(head);
+
+  let shown = 0;
+
+  for (const k of keys) {
+
+    const e = byKey.get(k);
+
+    if (!e) continue;
+
+    shown++;
+
+    const item = el('div', 'citeitem');
+
+    item.append(el('div', 'citekey', bib.style === 'numeric'
+
+      ? '[' + e.num + '] ' + esc(k) : esc(k)));
+
+    item.append(el('div', 'citetext', esc(e.plain)));
+
+    pop.append(item);
+
+  }
+
+  if (!shown) return;
+
+  document.body.append(pop);
+
+  // same placement as the proof popup: below the span, clamped, flipped up
+
+  const r = span.getBoundingClientRect();
+
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+
+  let left = r.left + window.scrollX;
+
+  let top = r.bottom + window.scrollY + 4;
+
+  if (left + pw > window.scrollX + document.documentElement.clientWidth - 8) {
+
+    left = window.scrollX + document.documentElement.clientWidth - pw - 8;
+
+  }
+
+  if (top + ph > window.scrollY + window.innerHeight && r.top - ph > 0) {
+
+    top = r.top + window.scrollY - ph - 4;
+
+  }
+
+  pop.style.left = left + 'px';
+
+  pop.style.top = top + 'px';
+
+  pfPopup = pop;
+
+}
+
+
+
+function initProofHover() {
+
+  document.addEventListener('mouseover', ev => {
+
+    const cite = ev.target.closest && ev.target.closest('.citeref');
+
+    if (cite) {
+
+      clearTimeout(pfHideTimer);
+
+      showCitePopup(cite);
+
+      return;
+
+    }
+
+    const span = ev.target.closest && ev.target.closest('.pf-err');
+
+    if (span) {
+
+      clearTimeout(pfHideTimer);
+
+      showProofPopup(span);
+
+    } else if (pfPopup && !(ev.target.closest && ev.target.closest('.pfpopup'))) {
+
+      // small grace period so the short hop to the popup doesn't close it
+
+      clearTimeout(pfHideTimer);
+
+      pfHideTimer = setTimeout(hideProofPopup, 450);
+
+    } else if (pfPopup) {
+
+      clearTimeout(pfHideTimer); // pointer is on the popup
+
+    }
+
+  });
+
+  document.addEventListener('scroll', () => {
+
+    if (pfPopup) hideProofPopup();
+
+  }, true);
+
+  window.addEventListener('resize', hideProofPopup);
+
+}
+
+
+
+async function applyProofFix(issue, replacement) {
+
+  const b = state.doc ? state.doc.blocks.find(x => x.id === issue.block_id) : null;
+
+  if (!b) { toast('Block no longer exists — re-check first', true); return; }
+
+  if (b.source.slice(issue.start, issue.end) !== issue.text) {
+
+    toast('Text changed since the check — re-check first', true);
+
+    dropProofIssue(issue);
+
+    return;
+
+  }
+
+  if (state.edit && state.edit.id === issue.block_id) closeEditor();
+
+  const newSource = b.source.slice(0, issue.start) +
+
+    replacement + b.source.slice(issue.end);
+
+  try {
+
+    const res = await ppost(`/block/${issue.block_id}/save`, {source: newSource});
+
+    applyDoc(res.doc); // also prunes stale issues and re-renders
+
+    toast('Suggestion applied');
+
+    checkBlocks([issue.block_id]); // re-check the fixed block
+
+  } catch (e) { handleOpError(e, b); }
+
+}
+
+
+
 
 
 }
@@ -2230,6 +3162,7 @@ function applyDoc(doc, fromDisk = false) {
     : 0;
 
   state.doc = doc;
+  pruneProofIssues(doc); // drop issues whose block text changed
   renderAll();
 
   if (keep) {
@@ -2336,6 +3269,7 @@ window.addEventListener('load', async () => {
   setupToggle('filesHead', 'filelist', 'sb-files-collapsed');
   setupToggle('outlineHead', 'outline', 'sb-outline-collapsed');
   setupToggle('gitHead', 'gitpanel', 'sb-git-collapsed');
+  setupToggle('proofHead', 'proofpanel', 'sb-proof-collapsed');
   // track reading position for the outline highlight
   let scrollTimer = null;
   $('#content').addEventListener('scroll', () => {
