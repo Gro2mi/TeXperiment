@@ -70,6 +70,9 @@ class Store:
         self.root = self.main_path.parent
         self.fs = FileStore(self.root)
         self.lock = threading.RLock()
+        # document history: per-op file snapshots for undo/redo. Entries are
+        # {'label', 'before': {rel: (text, enc)}, 'after': {rel: (text, enc)}}
+        self.history = {'undo': [], 'redo': []}
         self.rebuild()
 
     # -- model ------------------------------------------------------------
@@ -105,10 +108,56 @@ class Store:
     def _read(self, rel):
         return read_text_preserve(self.root / rel)
 
-    def _write_and_rebuild(self, rel, new_text):
+    def _write_and_rebuild(self, rel, new_text, label):
+        p = self.root / rel
+        if p.exists():
+            old_text, old_enc = read_text_preserve(p)
+            before = {rel: (old_text, old_enc)}
+        else:
+            before = {rel: None}
         text, enc = self._read(rel)
         self.fs.write(self.root / rel, new_text, enc)
         self.rebuild()
+        self._record(label, before, {rel: (new_text, enc)})
+
+    # -- history -------------------------------------------------------------
+    HISTORY_LIMIT = 100
+
+    def _record(self, label, before, after):
+        self.history['undo'].append(
+            {'label': label, 'before': before, 'after': after})
+        if len(self.history['undo']) > self.HISTORY_LIMIT:
+            self.history['undo'].pop(0)
+        self.history['redo'].clear()
+
+    def _restore(self, files):
+        for rel, snap in files.items():
+            p = self.root / rel
+            if snap is None:  # the op created this file — undo removes it
+                if p.exists():
+                    p.unlink()
+            else:
+                text, enc = snap
+                self.fs.write(p, text, enc)
+        self.rebuild()
+
+    def op_undo(self):
+        with self.lock:
+            if not self.history['undo']:
+                return None
+            entry = self.history['undo'].pop()
+            self._restore(entry['before'])
+            self.history['redo'].append(entry)
+            return entry['label']
+
+    def op_redo(self):
+        with self.lock:
+            if not self.history['redo']:
+                return None
+            entry = self.history['redo'].pop()
+            self._restore(entry['after'])
+            self.history['undo'].append(entry)
+            return entry['label']
 
     # -- ops ----------------------------------------------------------------
     def op_save(self, bid, new_source):
@@ -119,7 +168,7 @@ class Store:
             if nt is None:
                 raise ConflictError(
                     f'block {bid} no longer matches {b["file"]} on disk')
-            self._write_and_rebuild(b['file'], nt)
+            self._write_and_rebuild(b['file'], nt, 'edit block')
 
     def op_delete(self, bid):
         with self.lock:
@@ -137,7 +186,7 @@ class Store:
             nt = patch(text, s2, e2, text[s2:e2], '')
             if nt is None:
                 raise ConflictError(f'block {bid} no longer matches on disk')
-            self._write_and_rebuild(b['file'], nt)
+            self._write_and_rebuild(b['file'], nt, 'delete block')
 
     def op_move(self, bid, direction, positions=1):
         if direction not in ('up', 'down'):
@@ -159,11 +208,8 @@ class Store:
             seps = [text[same[k]['end']:
                          (same[k + 1]['start'] if k + 1 < len(same) else len(text))]
                     for k in range(len(same))]
-            srcs = [x['source'] for x in same]
-            moved = srcs.pop(i)
-            srcs.insert(j, moved)
             nt = lead + ''.join(s + sep for s, sep in zip(srcs, seps)) + trail
-            self._write_and_rebuild(b['file'], nt)
+            self._write_and_rebuild(b['file'], nt, 'move block')
 
     def op_insert(self, after_id, source):
         with self.lock:
@@ -172,7 +218,7 @@ class Store:
                 raise ValueError(f'cannot insert after a {b["type"]} block')
             text, _ = self._read(b['file'])
             nt = text[:b['end']] + '\n\n' + source + text[b['end']:]
-            self._write_and_rebuild(b['file'], nt)
+            self._write_and_rebuild(b['file'], nt, 'insert block')
             for x in self.doc['blocks']:
                 if x['file'] == b['file'] and x['source'] == source:
                     return x['id']
@@ -197,9 +243,7 @@ class Store:
     def raw_put(self, rel, source):
         with self.lock:
             self._check_rel(rel, must_be_tex=True)
-            text, enc = self._read(rel)
-            self.fs.write(self.root / rel, source, enc)
-            self.rebuild()
+            self._write_and_rebuild(rel, source, 'raw file edit')
 
 
 class Project:

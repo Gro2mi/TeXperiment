@@ -32,6 +32,15 @@ body {
 .conn { margin: 0 16px 12px; font-size: 11px; padding: 3px 8px; border-radius: 10px; display: inline-block; }
 .conn-on { background: #1d3b2a; color: #7fe0a7; }
 .conn-off { background: #3b2323; color: #e0a2a2; }
+
+/* ---------- undo / redo toolbar ---------- */
+#edtoolbar { display: flex; gap: 4px; margin: 0 16px 4px; }
+#edtoolbar button {
+  flex: 1; background: #2e343d; color: var(--side-ink); border: 1px solid #3c434e;
+  border-radius: 5px; padding: 4px 9px; cursor: pointer; font-size: 12px;
+}
+#edtoolbar button:hover:not(:disabled) { background: #3a424d; color: #fff; }
+#edtoolbar button:disabled { opacity: .35; cursor: default; }
 .sb-head {
   font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
   color: #7a8290; margin: 18px 16px 6px;

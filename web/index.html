@@ -17,7 +17,11 @@
   <aside id="sidebar">
     <h1 class="brand">TeX<span>periment</span></h1>
     <div id="conn" class="conn conn-off">connecting…</div>
-    <div class="sb-head sb-headrow" id="projHead"><span>Project</span><button id="projadd" title="Add project from disk">＋</button></div>
+    <div id="edtoolbar">
+      <button id="undobtn" title="Undo last change (Ctrl+Z)" disabled>↩ Undo</button>
+      <button id="redobtn" title="Redo (Ctrl+Shift+Z or Ctrl+Y)" disabled>↪ Redo</button>
+    </div>
+    <div class="sb-head sb-headrow" id="projHead">
     <div id="projlist"></div>
     <div class="sb-head" id="filesHead">Files</div>
     <div id="filelist"></div>

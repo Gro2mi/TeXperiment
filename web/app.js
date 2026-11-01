@@ -23,6 +23,7 @@ const state = {
     checking: false,
     checked: false,
   },
+  history: {can_undo: false, can_redo: false}, // server-side undo/redo flags
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -3108,6 +3109,72 @@ async function applyProofFix(issue, replacement) {
 }
 
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* undo / redo of document changes (server-side snapshot history)      */
+/* ------------------------------------------------------------------ */
+
+function syncHistoryButtons() {
+  const h = state.history;
+  const ub = $('#undobtn'), rb = $('#redobtn');
+  ub.disabled = !state.project || !h.can_undo;
+  rb.disabled = !state.project || !h.can_redo;
+  ub.title = h.can_undo ? `Undo ${h.undo_label || 'change'} (Ctrl+Z)`
+    : 'Undo last change (Ctrl+Z)';
+  rb.title = h.can_redo ? `Redo ${h.redo_label || 'change'} (Ctrl+Shift+Z or Ctrl+Y)`
+    : 'Redo (Ctrl+Shift+Z or Ctrl+Y)';
+}
+
+async function refreshHistory() {
+  if (!state.project) {
+    state.history = {can_undo: false, can_redo: false};
+  } else {
+    try { state.history = await papi('/history'); }
+    catch (e) { return; /* keep last known state */ }
+  }
+  syncHistoryButtons();
+}
+
+async function doUndo() {
+  if (!state.project) return;
+  try {
+    const res = await ppost('/undo', {});
+    state.history = res;
+    syncHistoryButtons();
+    if (res.noop) { toast('Nothing to undo'); return; }
+    applyDoc(res.doc);
+    toast('Undone: ' + res.label);
+  } catch (e) { toast('Undo failed: ' + e.message, true); }
+}
+
+async function doRedo() {
+  if (!state.project) return;
+  try {
+    const res = await ppost('/redo', {});
+    state.history = res;
+    syncHistoryButtons();
+    if (res.noop) { toast('Nothing to redo'); return; }
+    applyDoc(res.doc);
+    toast('Redone: ' + res.label);
+  } catch (e) { toast('Redo failed: ' + e.message, true); }
+}
+
+// Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y — but only outside text fields, where the
+// browser's native text undo must keep working
+document.addEventListener('keydown', ev => {
+  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return;
+  const k = (ev.key || '').toLowerCase();
+  const isUndo = k === 'z' && !ev.shiftKey;
+  const isRedo = (k === 'z' && ev.shiftKey) || k === 'y';
+  if (!isUndo && !isRedo) return;
+  const t = ev.target;
+  if (t && (t.isContentEditable ||
+      ['INPUT', 'TEXTAREA', 'SELECT', 'MATH-FIELD'].includes(t.tagName))) {
+    return;
+  }
+  ev.preventDefault();
+  isUndo ? doUndo() : doRedo();
+});
+
 /* doc lifecycle: apply + websocket live reload                        */
 /* ------------------------------------------------------------------ */
 
@@ -3183,6 +3250,10 @@ function applyDoc(doc, fromDisk = false) {
     const n = document.querySelector(`.block[data-id="${anchorId}"]`);
     if (n) content.scrollTop += n.offsetTop - prevOffset;
   }
+  // saves and external reloads both change what git sees — debounce so a
+  // burst of saves doesn't fire a git subprocess per keystroke
+  scheduleGitRefresh();
+  refreshHistory(); // cheap in-memory flags — keep undo/redo current
 }
 
 async function refreshDoc() {
