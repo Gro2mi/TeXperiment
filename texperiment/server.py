@@ -743,7 +743,7 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
             raise HTTPException(500, 'Compilation timed out after 300 s.')
         except OSError as e:
             raise HTTPException(500, f'Could not run {cmd[0]}: {e}')
-        pdf = proj.store.main_path.with_suffix('.pdf')
+        pdf = _pdf_path(proj)
         tail = '\n'.join((proc.stdout or '').splitlines()[-40:])
         # latexmk can exit non-zero while still producing a PDF (best-effort
         # with -f), or report "nothing to do" for an up-to-date PDF — serve
@@ -754,19 +754,62 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
             clean, log = False, tail
         if not pdf.exists():
             err = ((proc.stderr or '') + '\n' + tail).strip()
+            hint = ('latexmk reported success but no PDF was found — check '
+                    '$out_dir in your latexmkrc (looked in ' +
+                    str(proj.store.main_path.with_suffix('.pdf').parent) + ').')
             raise HTTPException(500, 'Compilation failed:\n'
-                                + (err or f'exit code {proc.returncode}'))
+                                + (err or f'exit code {proc.returncode}')
+                                + '\n' + hint)
         return {'ok': True, 'pdf': f'/api/project/{pid}/pdf',
                 'clean': clean, 'log': log}
 
     @app.get('/api/project/{pid}/pdf')
     def project_pdf(pid: str):
         proj = get_project(pid)
-        pdf = proj.store.main_path.with_suffix('.pdf')
+        pdf = _pdf_path(proj)
         if not pdf.exists():
             raise HTTPException(404, 'No PDF yet — compile first.')
         return FileResponse(str(pdf), media_type='application/pdf',
                             headers={'Cache-Control': 'no-store'})
+
+    # -- bibliography (citation resolution from the compiled .bbl) --------------
+    @app.get('/api/project/{pid}/bibliography')
+    def bibliography_route(pid: str):
+        proj = get_project(pid)
+        root = proj.store.root
+        stem = proj.store.main_path.stem
+        # the .bbl sits wherever bibtex last ran — the latexmkrc out_dir,
+        # the project root, or a build/ dir from an older rc setting; take
+        # the newest one so an rc change can't orphan the references
+        cands = []
+        out_dir = _latexmk_outdir(root)
+        if out_dir:
+            cands.append(root / out_dir / f'{stem}.bbl')
+        cands.append(root / f'{stem}.bbl')
+        cands.append(root / 'build' / f'{stem}.bbl')
+        cands = [c for c in cands if c.exists()]
+        bbl = max(cands, key=lambda c: c.stat().st_mtime) if cands else None
+        if bbl is None:
+            return {'available': False, 'style': 'numeric', 'entries': []}
+        entries = []
+        for num, (key, label, raw) in enumerate(
+                _parse_bbl(bbl.read_text(encoding='utf-8', errors='replace')), 1):
+            authors = year = ''
+            if label:
+                clean = _latex_clean(label)
+                m = re.match(r'^(.*?)\(([^()]*)\)', clean)
+                if m:
+                    authors, year = m.group(1).strip(), m.group(2).strip()
+                else:
+                    authors = clean
+            entries.append({'key': key, 'num': num, 'label': _latex_clean(label or ''),
+                            'authors': authors, 'year': year,
+                            'plain': _tex_plain(raw)})
+        # natbib author-year styles emit \bibitem[Author(Year)]{key};
+        # numeric styles leave the optional label out
+        style = ('authoryear'
+                 if any('(' in e['label'] for e in entries) else 'numeric')
+        return {'available': bool(entries), 'style': style, 'entries': entries}
 
     # -- project images (\includegraphics) ---------------------------------------
     @app.get('/files/{pid}/{rel:path}')
