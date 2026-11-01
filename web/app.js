@@ -610,18 +610,25 @@ function computeSectionNumbers() {
 }
 
 function renderSidebar() {
-  // project selector
-  const sel = $('#projsel');
-  sel.innerHTML = '';
+  // projects as a list, most recently used first; compile/remove per row
+  const pl = $('#projlist');
+  pl.innerHTML = '';
   for (const p of state.projects) {
-    const opt = el('option', '', esc(p.name));
-    opt.value = p.id;
-    if (p.id === state.project) opt.selected = true;
-    sel.append(opt);
+    const row = el('div', 'pitem' + (p.id === state.project ? ' current' : ''));
+    row.title = p.main;
+    const name = el('span', 'pname', esc(p.name));
+    name.onclick = () => switchProject(p.id);
+    const tools = el('span', 'ptools');
+    const pdfBtn = el('button', 'ptoolbtn', 'PDF');
+    pdfBtn.title = 'Compile this project and view the PDF';
+    pdfBtn.onclick = ev => { ev.stopPropagation(); compileProject(p.id); };
+    const delBtn = el('button', 'ptoolbtn danger', '✕');
+    delBtn.title = 'Remove this project';
+    delBtn.onclick = ev => { ev.stopPropagation(); removeProject(p.id); };
+    tools.append(pdfBtn, delBtn);
+    row.append(name, tools);
+    pl.append(row);
   }
-  const has = !!state.project;
-  $('#projdel').disabled = !has;
-  $('#projcompile').disabled = !has;
 
   const fl = $('#filelist');
   fl.innerHTML = '';
@@ -1345,13 +1352,16 @@ async function removeProject() {
 /* LaTeX compilation                                                   */
 /* ------------------------------------------------------------------ */
 
-async function compileProject() {
-  if (!state.project) return;
-  const btn = $('#projcompile');
-  btn.disabled = true;
-  btn.textContent = '…';
+async function compileProject(pid) {
+  const target = pid || state.project;
+  if (!target) return;
+  const bar = $('#compiling');
+  const pname = (state.projects.find(p => p.id === target) || {}).name || '';
+  bar.innerHTML = `<span class="spin"></span> Compiling PDF — <b>${esc(pname)}</b>… ` +
+    '<span class="compilinghint">large documents can take a while</span>';
+  bar.classList.remove('hidden');
   try {
-    const res = await ppost('/compile', {});
+    const res = await post(`/api/project/${target}/compile`, {});
     window.open(res.pdf + '?t=' + Date.now(), '_blank');
     if (res.clean === false && res.log) {
       showCompileLog('The PDF was produced, but LaTeX reported problems:\n\n' + res.log);
@@ -1361,8 +1371,7 @@ async function compileProject() {
   } catch (e) {
     showCompileLog(e.message);
   } finally {
-    btn.disabled = !state.project;
-    btn.textContent = 'PDF';
+    bar.classList.add('hidden');
   }
 }
 
@@ -1658,6 +1667,7 @@ window.addEventListener('load', async () => {
       apply(c);
     });
   };
+  setupToggle('projHead', 'projlist', 'sb-project-collapsed');
   setupToggle('filesHead', 'filelist', 'sb-files-collapsed');
   setupToggle('outlineHead', 'outline', 'sb-outline-collapsed');
   // track reading position for the outline highlight

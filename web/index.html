@@ -12,17 +12,13 @@
 </head>
 <body>
 <div id="banner" class="hidden"></div>
+<div id="compiling" class="hidden"></div>
 <div id="layout">
   <aside id="sidebar">
     <h1 class="brand">TeX<span>periment</span></h1>
     <div id="conn" class="conn conn-off">connecting…</div>
-    <div class="sb-head">Project</div>
-    <div id="projbar">
-      <select id="projsel" title="Switch project"></select>
-      <button id="projadd" title="Add project from disk">＋</button>
-      <button id="projcompile" title="Compile LaTeX and view the PDF (needs a TeX installation)">PDF</button>
-      <button id="projdel" title="Remove current project">✕</button>
-    </div>
+    <div class="sb-head sb-headrow" id="projHead"><span>Project</span><button id="projadd" title="Add project from disk">＋</button></div>
+    <div id="projlist"></div>
     <div class="sb-head" id="filesHead">Files</div>
     <div id="filelist"></div>
     <div class="sb-head" id="outlineHead">Outline</div>

@@ -226,17 +226,64 @@ math-field { display: block; width: 100%; min-height: 54px; padding: 6px; border
 figure.blkfig { margin: 1em 0; }
 
 /* ---------- project bar ---------- */
-#projbar { display: flex; gap: 4px; margin: 0 16px 4px; align-items: center; }
-#projsel {
-  flex: 1; min-width: 0; background: #2e343d; color: #fff; border: 1px solid #3c434e;
-  border-radius: 5px; padding: 4px 6px; font-size: 12.5px;
+/* projects list */
+#projlist { padding: 0 0 4px; }
+#projlist .pitem {
+  display: flex; align-items: center; width: 100%;
+  background: none; border: none; color: var(--side-ink);
+  font: 12.5px/1.4 var(--mono); padding: 3px 10px 3px 16px; cursor: pointer;
 }
-#projbar button {
+#projlist .pitem:hover { background: #2e343d; color: #fff; }
+#projlist .pitem.current {
+  background: #2e343d; color: #fff; font-weight: 600;
+  box-shadow: inset 3px 0 0 0 #7db4ff;
+}
+#projlist .pname {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; text-align: left;
+}
+#projlist .ptools { display: none; gap: 3px; flex: none; }
+#projlist .pitem:hover .ptools { display: inline-flex; }
+.ptoolbtn {
   background: #2e343d; color: var(--side-ink); border: 1px solid #3c434e;
-  border-radius: 5px; padding: 4px 9px; cursor: pointer; font-size: 13px;
+  border-radius: 4px; cursor: pointer; font-size: 10px; padding: 2px 6px;
+  font-family: inherit;
 }
-#projbar button:hover { background: #3a424d; color: #fff; }
-#projbar button:disabled { opacity: .35; cursor: default; }
+.ptoolbtn:hover { background: #3a424d; color: #fff; }
+.ptoolbtn.danger:hover { background: #4a2626; border-color: #7a3b3b; }
+.sb-headrow {
+  display: flex; align-items: center; justify-content: flex-start;
+  gap: 8px; cursor: default;
+}
+#projadd {
+  background: none; border: 1px solid #3c434e; color: var(--side-ink);
+  border-radius: 5px; cursor: pointer; font-size: 12px; padding: 1px 7px;
+}
+#projadd:hover { background: #2e343d; color: #fff; }
+
+/* prominent compiling indicator */
+#compiling {
+  position: fixed; top: 64px; left: 50%; transform: translateX(-50%);
+  z-index: 65; background: #1d3b5e; color: #dceaff;
+  border: 1px solid #4a7ab5; border-radius: 24px;
+  padding: 10px 22px; font-size: 14px; box-shadow: 0 4px 18px rgba(0,0,0,.35);
+  display: flex; align-items: center; gap: 10px;
+}
+#compiling .compilinghint { color: #8fb4e0; font-size: 12px; }
+#compiling .spin {
+  width: 15px; height: 15px; border-radius: 50%;
+  border: 2px solid #4a7ab5; border-top-color: #dceaff;
+  animation: spin 0.9s linear infinite; flex: none;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* outline collapse chevrons */
+.ochev {
+  display: inline-block; width: 13px; margin-left: -15px;
+  color: #98a0ab; cursor: pointer; user-select: none;
+}
+.oitem:hover .ochev { color: #dfe6ee; }
+.ochev.noleaf { cursor: default; }
 
 /* compile log */
 .compilelogpre {
