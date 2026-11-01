@@ -915,9 +915,13 @@ function renderContent() {
     const h = hiddenIds.has(b.id);
     docEl.append(blockEl(b, h));
     if (EDITABLE.has(b.type)) {
-      // the insert line sits between two blocks: visible only if both are
+      // the insert line sits between two blocks: visible only if both are;
+      // never between a heading and the \label{} that names it
+      const next = i + 1 < blocks.length ? blocks[i + 1] : null;
+      const headingLabel = b.type === 'section' && next &&
+        next.source.trimStart().startsWith('\\label{');
       const nextH = i + 1 < blocks.length ? hiddenIds.has(blocks[i + 1].id) : h;
-      docEl.append(insertLine(b, h || nextH));
+      if (!headingLabel) docEl.append(insertLine(b, h || nextH));
     }
   }
   c.append(docEl);
