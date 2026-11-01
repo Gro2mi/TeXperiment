@@ -24,6 +24,7 @@ const state = {
     checked: false,
   },
   history: {can_undo: false, can_redo: false}, // server-side undo/redo flags
+  bib: null,         // parsed .bbl: {style, entries} — null = not loaded
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -199,6 +200,13 @@ function renderInline(src) {
         }
         const g = readGroup(src, j);
         if (g) {
+          const keys = g.body.split(',').map(s => s.trim()).filter(Boolean);
+          const resolved = renderCitation(cmd, opts, keys);
+          if (resolved !== null) {
+            out += resolved;
+            i = g.end;
+            continue;
+          }
           const optStr = opts.length ? '[' + opts.join('][') + ']' : '';
           out += `<span class="chip">${esc(cmd)}${esc(optStr)}{${esc(g.body)}}</span>`;
           i = g.end;
@@ -1420,6 +1428,7 @@ function switchProject(pid) {
   state.proof.issues = [];
   state.proof.checked = false;
   loadProofConfig();
+  refreshBib();
   refreshDoc();
 }
 
@@ -1450,6 +1459,9 @@ async function compileProject(pid) {
   bar.classList.remove('hidden');
   try {
     const res = await post(`/api/project/${target}/compile`, {});
+    if (target === state.project) {
+      refreshBib(); // the .bbl just changed — resolve citations with it
+    }
     window.open(res.pdf + '?t=' + Date.now(), '_blank');
     if (res.clean === false && res.log) {
       showCompileLog('The PDF was produced, but LaTeX reported problems:\n\n' + res.log);
