@@ -1232,6 +1232,21 @@ function reflowLongLines(src, limit = 120) {
 /* ------------------------------------------------------------------ */
 
 // anchored to the end only: the command must sit directly before the '{'
+const AC_UNITS = [
+  ['m', 'metre — length'], ['km', 'kilometre'], ['cm', 'centimetre'], ['mm', 'millimetre'],
+  ['kg', 'kilogram — mass'], ['g', 'gram'], ['mg', 'milligram'],
+  ['s', 'second — time'], ['ms', 'millisecond'], ['min', 'minute'], ['h', 'hour'], ['d', 'day'],
+  ['A', 'ampere — current'], ['K', 'kelvin — temperature'], ['degC', 'degree Celsius'],
+  ['mol', 'mole — amount'], ['cd', 'candela'],
+  ['m/s', 'velocity'], ['km/h', 'velocity'], ['m/s^2', 'acceleration'],
+  ['N', 'newton — force'], ['Pa', 'pascal — pressure'], ['hPa', 'hectopascal'], ['kPa', 'kilopascal'],
+  ['J', 'joule — energy'], ['kJ', 'kilojoule'], ['kWh', 'kilowatt hour'], ['eV', 'electronvolt'],
+  ['W', 'watt — power'], ['kW', 'kilowatt'], ['MW', 'megawatt'], ['Hz', 'hertz — frequency'],
+  ['C', 'coulomb — charge'], ['V', 'volt — voltage'], ['\Omega', 'ohm — resistance'],
+  ['T', 'tesla — flux density'], ['Wb', 'weber'], ['H', 'henry — inductance'],
+  ['lm', 'lumen'], ['lx', 'lux'], ['dB', 'decibel'], ['%', 'percent'],
+].map(([u, d]) => ({u, d}));
+
 const AC_CITE_RE = /\\(?:cite[a-zA-Z]*|Cite[pt])\*?(?:\[[^\]]*\])*$/;
 const AC_REF_RE = /\\(?:ref|eqref|cref|Cref|autoref|pageref|label)\*?$/;
 
@@ -1258,6 +1273,11 @@ const AC_COMMANDS = [
   {t: 'emph', i: '\\emph{|}', c: 'text'},
   {t: 'underline', i: '\\underline{|}', c: 'text'},
   {t: 'texttt', i: '\\texttt{|}', c: 'text'},
+  {t: 'SI', i: '\\SI{|}{}', c: 'units (siunitx)'},
+  {t: 'qty', i: '\\qty{|}{}', c: 'units (siunitx)'},
+  {t: 'num', i: '\\num{|}', c: 'units (siunitx)'},
+  {t: 'si', i: '\\si{|}', c: 'units (siunitx)'},
+  {t: 'ang', i: '\\ang{|}', c: 'units (siunitx)'},
   {t: 'caption', i: '\\caption{|}', c: 'floats'},
   {t: 'includegraphics', i: '\\includegraphics[width=0.8\\textwidth]{|}', c: 'floats'},
   {t: 'item', i: '\\item ', c: 'lists'},
@@ -1285,6 +1305,10 @@ function acContext(ta) {
       const typed = partial.slice(partial.lastIndexOf(',') + 1).trimStart();
       if (AC_CITE_RE.test(cmd)) return {kind: 'cite', typed};
       if (AC_REF_RE.test(cmd)) return {kind: 'ref', typed};
+      // unit positions: second brace of \SI{val}{ and the brace of \si{val}
+      if (/\\SI\{[^{}]*\}$/.test(cmd) || /\\si$/.test(cmd)) {
+        return {kind: 'unit', typed};
+      }
     }
   }
   // 2) a (partial) command name → command completion; a backslash directly
@@ -1300,11 +1324,15 @@ function acContext(ta) {
 function acSuggestions(kind, typed) {
   const t = typed.toLowerCase();
   if (kind === 'cmd') {
-    return AC_COMMANDS.filter(c => c.t.startsWith(t))
+    return AC_COMMANDS.filter(c => c.t.toLowerCase().startsWith(t))
       .slice(0, 12)
       .map(c => ({insert: c.i, title: '\\' + c.t, sub: c.c}));
   }
   let items = [];
+  if (kind === 'unit') {
+    return AC_UNITS.filter(u => u.u.toLowerCase().startsWith(t) || u.d.toLowerCase().includes(t))
+      .slice(0, 12).map(u => ({insert: u.u, title: u.u, sub: u.d}));
+  }
   if (kind === 'cite') {
     if (state.bib && state.bib.available) {
       items = state.bib.entries.map(e => ({
