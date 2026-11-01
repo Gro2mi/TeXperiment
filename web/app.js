@@ -3376,10 +3376,22 @@ async function applyProofFix(issue, replacement) {
     toast('Suggestion applied');
 
     checkBlocks([issue.block_id]); // re-check the fixed block
-
   } catch (e) { handleOpError(e, b); }
-
 }
+/* ------------------------------------------------------------------ */
+/* theme: dark default, persisted light/dark switch                    */
+/* ------------------------------------------------------------------ */
+
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem('theme', t);
+  const btn = $('#themebtn');
+  if (btn) {
+    btn.textContent = t === 'dark' ? '☀' : '🌙';
+    btn.title = t === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+  }
+}
+
 
 
 
@@ -3609,7 +3621,9 @@ window.addEventListener('load', async () => {
       head.classList.toggle('collapsed', c);
     };
     apply(localStorage.getItem(key) === '1');
-    head.addEventListener('click', () => {
+    head.addEventListener('click', ev => {
+      // a button inside the head (e.g. ＋ add project) must not toggle
+      if (ev.target.closest && ev.target.closest('button')) return;
       const c = !list.classList.contains('sb-collapsed');
       localStorage.setItem(key, c ? '1' : '0');
       apply(c);
