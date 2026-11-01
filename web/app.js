@@ -1020,6 +1020,7 @@ function startBlockDrag(grip, node, b) {
     if (ev.button !== 0 || state.dragActive) return;
     ev.preventDefault();
     ev.stopPropagation();
+    const grabY = ev.clientY;
     state.dragActive = true;
     node.classList.add('dragging');
     document.body.classList.add('drag-active');
@@ -1059,7 +1060,18 @@ function startBlockDrag(grip, node, b) {
         for (let k = ti; k >= 0; k--) {
           if (level(same[k]) <= lv) { owner = k; break; }
         }
-        if (owner < 0 || owner === si) return; // dropped inside its own scope
+        if (owner < 0) return;
+        // dropped inside the section's own scope: treat the drag direction
+        // (down/up vs. the grab point) as "move one sibling" — a natural
+        // drag gesture should never be a silent no-op
+        if (owner === si) {
+          const d = e.clientY > grabY ? 'down' : 'up';
+          const hasSib = same.some((x, k) => k !== si && level(x) <= lv &&
+            (d === 'down' ? k > si : k < si));
+          if (!hasSib) { toast('No neighboring section to move into'); return; }
+          await moveBlockFn(src, d, 1);
+          return;
+        }
         const dir = ti > si ? 'down' : 'up';
         const sibs = same.map((x, k) => k)
           .filter(k => k !== si && level(same[k]) <= lv &&
