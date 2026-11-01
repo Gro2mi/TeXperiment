@@ -1361,7 +1361,7 @@ function buildEditor(b, kind) {
   ed.root.append(bar);
 
   const commit = async () => {
-    const src = ed.getValue();
+    const src = reflowLongLines(ed.getValue());
     if (src === state.edit.original) { closeEditor(); return; }
     const editRef = state.edit;
     if (editRef.kind === 'math') dismissMathKeyboard(editRef.root.root);
@@ -1679,7 +1679,7 @@ async function openRaw(path) {
       const res = await papi('/file', {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({path, source: ta.value}),
+        body: JSON.stringify({path, source: reflowLongLines(ta.value)}),
       });
       close();
       applyDoc(res.doc);
