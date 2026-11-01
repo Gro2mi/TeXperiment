@@ -13,6 +13,10 @@ const state = {
   edit: null,        // {id, kind, original, root, block}
   browsePath: null,  // disk browser location
   collapsed: new Set(), // section block ids hidden via their chevron
+  git: null,         // last /git/status payload (null = not fetched yet)
+  gitChanged: new Set(), // block ids whose content differs from git HEAD
+  gitHl: true,       // highlight changed blocks in the document
+  gitShowDiff: false, // show only changed blocks
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -593,6 +597,7 @@ function renderAll() {
   computeSectionNumbers();
   renderSidebar();
   renderContent();
+  renderGit();
 }
 
 // document-order section numbering (section → 1, subsection → 1.1, …)
@@ -659,6 +664,7 @@ function renderSidebar() {
     ol.append(item);
   }
   updateOutlineCurrent();
+  applyOutlineGitMarks();
 }
 
 // highlight the outline entry for the section currently on screen
@@ -685,10 +691,10 @@ function scrollToBlock(id) {
 /* ------------------------------------------------------------------ */
 
 // ids of blocks hidden because they sit inside a collapsed section
-function computeCollapsedIds() {
+function computeCollapsedIds(blocks) {
   const hidden = new Set();
   let hideLevel = null, rootId = null;
-  for (const b of state.doc.blocks) {
+  for (const b of blocks) {
     if (b.type === 'section') {
       const lv = (b.meta && b.meta.level) || 2;
       if (hideLevel !== null && lv <= hideLevel) { hideLevel = null; rootId = null; }
@@ -719,9 +725,28 @@ function renderContent() {
       '<h2>No project open</h2><p>Click ＋ in the sidebar to open a main .tex file from disk.</p>'));
     return;
   }
-  const hiddenIds = computeCollapsedIds();
+  // diff-only mode: render just the blocks that differ from git HEAD
+  const diffMode = state.gitShowDiff && state.git && state.git.repo;
+  let blocks = state.doc.blocks;
+  if (diffMode) blocks = blocks.filter(b => state.gitChanged.has(b.id));
+  if (diffMode) {
+    const bar = el('div', 'diffbar');
+    bar.append(el('span', '', state.gitChanged.size
+      ? `Diff view — ${state.gitChanged.size} changed block${state.gitChanged.size === 1 ? '' : 's'}`
+      : 'Diff view — nothing differs from HEAD'));
+    const exit = el('button', 'edbtn', 'Exit');
+    exit.title = 'Back to the full document';
+    exit.onclick = toggleDiffOnly;
+    bar.append(el('span', 'spacer'), exit);
+    c.append(bar);
+    if (!blocks.length) {
+      c.append(el('div', 'emptystate',
+        '<h2>No changes</h2><p>Nothing differs from the last commit.</p>'));
+      return;
+    }
+  }
+  const hiddenIds = computeCollapsedIds(blocks);
   const docEl = el('div', 'doc');
-  const blocks = state.doc.blocks;
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i];
     const h = hiddenIds.has(b.id);
@@ -747,6 +772,7 @@ function blockEl(b, hidden = false) {
   const node = el('div', 'block b-' + b.type + (hidden ? ' b-collapsed' : ''));
   node.dataset.id = b.id;
   if (state.diskKeys && state.diskKeys.has(blockKey(b))) node.classList.add('disk-change');
+  if (state.gitHl && state.gitChanged.has(b.id)) node.classList.add('git-change');
   if (isBlankComment(b)) node.classList.add('b-hidden');
   node.append(el('div', 'bcontent', renderBlockContent(b)));
   node.append(buildTools(b));
@@ -1332,6 +1358,9 @@ function switchProject(pid) {
   if (pid === state.project) return;
   if (state.edit) closeEditor();
   state.project = pid;
+  state.git = null;
+  state.gitChanged = new Set();
+  state.gitShowDiff = false;
   refreshDoc();
 }
 
@@ -1508,6 +1537,642 @@ async function openBrowseModal() {
     }
   };
   await load(state.browsePath ? state.browsePath.path : '');
+/* ------------------------------------------------------------------ */
+
+/* git: status panel, block highlighting, diff-only view, commit, push */
+
+/* ------------------------------------------------------------------ */
+
+
+
+let gitTimer = null;
+
+function scheduleGitRefresh(delay = 600) {
+
+  clearTimeout(gitTimer);
+
+  gitTimer = setTimeout(refreshGit, delay);
+
+}
+
+
+
+// section id → number of changed blocks in its scope (itself + content
+
+// up to the next section of any level) — drives the outline markers
+
+function computeSectionChanges() {
+
+  const counts = new Map();
+
+  if (!state.doc) return counts;
+
+  let cur = null;
+
+  for (const b of state.doc.blocks) {
+
+    if (b.type === 'section') cur = b.id;
+
+    if (cur !== null && state.gitChanged.has(b.id)) {
+
+      counts.set(cur, (counts.get(cur) || 0) + 1);
+
+    }
+
+  }
+
+  return counts;
+
+}
+
+
+
+function applyOutlineGitMarks() {
+
+  if (!state.doc) return;
+
+  const counts = computeSectionChanges();
+
+  document.querySelectorAll('#outline .oitem').forEach(item => {
+
+    const c = counts.get(item.dataset.block) || 0;
+
+    item.classList.toggle('git-changed', c > 0);
+
+    let badge = item.querySelector('.ochanges');
+
+    if (c > 0) {
+
+      if (badge) badge.textContent = String(c);
+
+      else item.append(el('span', 'ochanges', String(c)));
+
+    } else if (badge) badge.remove();
+
+  });
+
+}
+
+
+
+// toggle the git-change class on the blocks already in the DOM — avoids a
+
+// full content re-render (and scroll jump) whenever only highlighting changes
+
+function applyGitHighlights() {
+
+  document.querySelectorAll('#content .block').forEach(n => {
+
+    n.classList.toggle('git-change', state.gitHl && state.gitChanged.has(n.dataset.id));
+
+  });
+
+}
+
+
+
+async function fetchGitChanges() {
+
+  try {
+
+    const ch = await papi('/git/changes');
+
+    state.gitChanged = new Set(ch.ids);
+
+  } catch (e) { /* status panel still works; highlighting stays as-is */ }
+
+}
+
+
+
+async function refreshGit() {
+
+  if (!state.project) {
+
+    state.git = null;
+
+    state.gitChanged = new Set();
+
+    renderGit();
+
+    return;
+
+  }
+
+  try {
+
+    state.git = await papi('/git/status');
+
+    if (state.git.repo) await fetchGitChanges();
+
+    else state.gitChanged = new Set();
+
+  } catch (e) {
+
+    return; // git hiccups shouldn't nag on every save
+
+  }
+
+  renderGit();
+
+  applyGitHighlights();
+
+  applyOutlineGitMarks();
+
+  if (state.gitShowDiff) renderContent(); // keep the diff filter current
+
+}
+
+
+
+function toggleGitHl() {
+
+  state.gitHl = !state.gitHl;
+
+  applyGitHighlights();
+
+  renderGit();
+
+}
+
+
+
+function toggleDiffOnly() {
+
+  state.gitShowDiff = !state.gitShowDiff;
+
+  // preserve the reading position across the re-render
+
+  const content = $('#content');
+
+  const firstVisible = [...document.querySelectorAll('.block')]
+
+    .find(n => n.getBoundingClientRect().bottom > 0);
+
+  const anchorId = firstVisible ? firstVisible.dataset.id : null;
+
+  const prevOffset = anchorId
+
+    ? (document.querySelector(`.block[data-id="${anchorId}"]`) || {}).offsetTop : 0;
+
+  renderContent();
+
+  renderGit();
+
+  if (anchorId) {
+
+    const n = document.querySelector(`.block[data-id="${anchorId}"]`);
+
+    if (n) content.scrollTop += n.offsetTop - prevOffset;
+
+  }
+
+}
+
+
+
+function renderGit() {
+
+  const panel = $('#gitpanel');
+
+  panel.innerHTML = '';
+
+  $('#gitHead').classList.toggle('hidden', !state.project);
+
+  if (!state.project) return;
+
+  const g = state.git;
+
+  if (!g) {
+
+    panel.append(el('div', 'gitmuted', 'checking…'));
+
+    return;
+
+  }
+
+  if (!g.repo) {
+
+    panel.append(el('div', 'gitmuted', 'Not a git repository.'));
+
+    const btn = el('button', 'edbtn gitinit', 'Initialize repository');
+
+    btn.onclick = gitInit;
+
+    panel.append(btn);
+
+    return;
+
+  }
+
+
+
+  // header: branch + ahead/behind + manual refresh
+
+  const head = el('div', 'githead');
+
+  head.append(el('span', 'gitbranch', '⎇ ' + (g.branch || 'HEAD')));
+
+  if (g.ahead || g.behind) {
+
+    head.append(el('span', 'gitsync',
+
+      (g.ahead ? `↑${g.ahead}` : '') + (g.behind ? `↓${g.behind}` : '')));
+
+  }
+
+  head.append(el('span', 'spacer'));
+
+  const refresh = el('button', 'gbtn', '↻');
+
+  refresh.title = 'Refresh git status';
+
+  refresh.onclick = () => refreshGit();
+
+  head.append(refresh);
+
+  panel.append(head);
+
+
+
+  // view toggles
+
+  const views = el('div', 'gitviews');
+
+  const hlBtn = el('button', 'gtoggle' + (state.gitHl ? ' on' : ''), 'Highlight changes');
+
+  hlBtn.onclick = toggleGitHl;
+
+  const diffBtn = el('button', 'gtoggle' + (state.gitShowDiff ? ' on' : ''), 'Only diff');
+
+  diffBtn.onclick = toggleDiffOnly;
+
+  views.append(hlBtn, diffBtn);
+
+  panel.append(views);
+
+
+
+  if (g.staged.length) panel.append(gitFileGroup('Staged changes', g.staged, 'staged'));
+
+  if (g.unstaged.length) panel.append(gitFileGroup('Changes', g.unstaged, 'unstaged'));
+
+  if (g.untracked.length) panel.append(gitFileGroup('Untracked', g.untracked, 'untracked'));
+
+  if (!g.staged.length && !g.unstaged.length && !g.untracked.length) {
+
+    panel.append(el('div', 'gitmuted', 'Working tree clean ✓'));
+
+  }
+
+
+
+  // commit helper (VS Code style): message box + commit/push
+
+  const ta = el('textarea', 'gitmsg');
+
+  ta.placeholder = 'Commit message (Ctrl+Enter to commit on all files)';
+
+  ta.rows = 3;
+
+  const bar = el('div', 'gitbar');
+
+  const commitBtn = el('button', 'edbtn primary', '✓ Commit');
+
+  const pushBtn = el('button', 'edbtn', '⇅ Push');
+
+  if (!g.has_remote) {
+
+    pushBtn.disabled = true;
+
+    pushBtn.title = 'No remote configured — add one with:\ngit remote add origin <url>';
+
+  }
+
+  commitBtn.onclick = () => gitCommit(ta);
+
+  pushBtn.onclick = gitPush;
+
+  bar.append(commitBtn, pushBtn);
+
+  panel.append(ta, bar);
+
+  ta.addEventListener('keydown', e => {
+
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+
+      e.preventDefault();
+
+      gitCommit(ta);
+
+    }
+
+  });
+
+}
+
+
+
+function gitFileGroup(title, paths, kind) {
+
+  const wrap = el('div', 'gitgroup');
+
+  wrap.append(el('div', 'gitgrouphead', `${title} (${paths.length})`));
+
+  for (const p of paths) {
+
+    const row = el('div', 'gitrow');
+
+    const name = el('span', 'gitpath', esc(p));
+
+    name.title = p;
+
+    row.append(name);
+
+    const mk = (label, tip, fn) => {
+
+      const b = el('button', 'gbtn', label);
+
+      b.title = tip;
+
+      b.onclick = ev => { ev.stopPropagation(); fn(); };
+
+      return b;
+
+    };
+
+    if (kind === 'staged') {
+
+      row.append(mk('⧉', 'View diff', () => openGitDiff(p, true)));
+
+      row.append(mk('−', 'Unstage', () => gitPaths('unstage', [p])));
+
+    } else {
+
+      row.append(mk('⧉', 'View diff', () => openGitDiff(p, false)));
+
+      if (kind === 'unstaged') row.append(mk('↩', 'Discard changes', () => gitDiscard(p)));
+
+      row.append(mk('+', 'Stage', () => gitPaths('stage', [p])));
+
+    }
+
+    wrap.append(row);
+
+  }
+
+  return wrap;
+
+}
+
+
+
+// stage / unstage are safe ops — refresh straight from the response
+
+async function gitPaths(op, paths) {
+
+  try {
+
+    const res = await ppost(`/git/${op}`, {paths});
+
+    state.git = res.status;
+
+    await fetchGitChanges();
+
+    renderGit();
+
+    applyGitHighlights();
+
+    applyOutlineGitMarks();
+
+  } catch (e) { toast(`Git ${op} failed: ` + e.message, true); }
+
+}
+
+
+
+async function gitDiscard(p) {
+
+  if (!confirm(`Discard all uncommitted changes in "${p}"?\nThis cannot be undone.`)) return;
+
+  try {
+
+    const res = await ppost('/git/discard', {paths: [p]});
+
+    state.git = res.status;
+
+    await fetchGitChanges();
+
+    renderGit();
+
+    applyGitHighlights();
+
+    applyOutlineGitMarks();
+
+    refreshDoc(); // the worktree changed underneath us
+
+  } catch (e) { toast('Discard failed: ' + e.message, true); }
+
+}
+
+
+
+async function gitCommit(ta) {
+
+  const msg = ta.value.trim();
+
+  if (!msg) { toast('Enter a commit message first', true); ta.focus(); return; }
+
+  const g = state.git;
+
+  let paths = null;
+
+  if (g && !g.staged.length) {
+
+    if (!g.unstaged.length && !g.untracked.length) { toast('Nothing to commit'); return; }
+
+    if (!confirm('Nothing is staged — stage all changes and commit?')) return;
+
+    paths = [...g.unstaged, ...g.untracked];
+
+  }
+
+  try {
+
+    const res = await ppost('/git/commit', {message: msg, paths});
+
+    state.git = res.status;
+
+    ta.value = '';
+
+    await fetchGitChanges();
+
+    renderGit();
+
+    applyGitHighlights();
+
+    applyOutlineGitMarks();
+
+    toast('Committed: ' + res.summary);
+
+  } catch (e) { toast('Commit failed: ' + e.message, true); }
+
+}
+
+
+
+async function gitPush() {
+
+  try {
+
+    const res = await ppost('/git/push', {});
+
+    state.git = res.status;
+
+    renderGit();
+
+    toast('Pushed to remote');
+
+  } catch (e) {
+
+    let msg = 'Push failed: ' + e.message;
+
+    if (/no upstream/i.test(e.message) && state.git && state.git.branch) {
+
+      msg += ` — run: git push -u origin ${state.git.branch}`;
+
+    }
+
+    toast(msg, true);
+
+  }
+
+}
+
+
+
+async function gitInit() {
+
+  try {
+
+    const res = await ppost('/git/init', {});
+
+    state.git = res.status;
+
+    await fetchGitChanges();
+
+    renderGit();
+
+    applyGitHighlights();
+
+    applyOutlineGitMarks();
+
+    toast('Git repository initialized');
+
+  } catch (e) { toast('git init failed: ' + e.message, true); }
+
+}
+
+
+
+// unified diff → colored lines; spans are display:block so backgrounds
+
+// cover the full line width
+
+function renderDiffText(text) {
+
+  if (!text || !text.trim()) return '<span class="d-none">No differences.</span>';
+
+  return text.split('\n').map(line => {
+
+    const t = esc(line) || '&nbsp;';
+
+    if (line.startsWith('@@')) return `<span class="d-hunk">${t}</span>`;
+
+    if (line.startsWith('+') && !line.startsWith('+++')) return `<span class="d-add">${t}</span>`;
+
+    if (line.startsWith('-') && !line.startsWith('---')) return `<span class="d-del">${t}</span>`;
+
+    if (line.startsWith('diff ') || line.startsWith('index ') ||
+
+        line.startsWith('--- ') || line.startsWith('+++ ')) {
+
+      return `<span class="d-meta">${t}</span>`;
+
+    }
+
+    return `<span>${t}</span>`;
+
+  }).join('');
+
+}
+
+
+
+async function openGitDiff(path, staged = false) {
+
+  const modal = $('#gitmodal');
+
+  modal.classList.remove('hidden');
+
+  modal.innerHTML = '';
+
+  const wrap = el('div', 'gitdiffwrap');
+
+  wrap.append(el('h3', '', (staged ? 'Staged changes — ' : 'Changes — ') + esc(path)));
+
+  const pre = el('pre', 'gitdiffpre', 'loading…');
+
+  wrap.append(pre);
+
+  const bar = el('div', 'edbar');
+
+  const closeBtn = el('button', 'edbtn', 'Close');
+
+  bar.append(el('span', 'spacer'), closeBtn);
+
+  wrap.append(bar);
+
+  modal.append(wrap);
+
+
+
+  const escClose = ev => { if (ev.key === 'Escape') close(); };
+
+  const close = () => {
+
+    document.removeEventListener('keydown', escClose, true);
+
+    modal.classList.add('hidden');
+
+    modal.innerHTML = '';
+
+  };
+
+  document.addEventListener('keydown', escClose, true);
+
+  closeBtn.onclick = close;
+
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+
+
+
+  try {
+
+    const res = await papi(`/git/diff?path=${encodeURIComponent(path)}&staged=${staged ? 1 : 0}`);
+
+    pre.innerHTML = renderDiffText(res.text);
+
+  } catch (e) {
+
+    pre.textContent = 'Failed to load diff: ' + e.message;
+
+  }
+
+}
+
+
+
 }
 
 /* ------------------------------------------------------------------ */
@@ -1670,6 +2335,7 @@ window.addEventListener('load', async () => {
   setupToggle('projHead', 'projlist', 'sb-project-collapsed');
   setupToggle('filesHead', 'filelist', 'sb-files-collapsed');
   setupToggle('outlineHead', 'outline', 'sb-outline-collapsed');
+  setupToggle('gitHead', 'gitpanel', 'sb-git-collapsed');
   // track reading position for the outline highlight
   let scrollTimer = null;
   $('#content').addEventListener('scroll', () => {

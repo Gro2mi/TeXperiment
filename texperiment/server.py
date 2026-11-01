@@ -17,7 +17,8 @@ from pydantic import BaseModel
 from .parser import parse_file
 from .resolver import read_text_preserve, resolve_files
 from .storage import ConflictError, FileStore, patch
-from . import watcher
+from . import gitops, watcher
+from .gitops import GitError
 
 WEB_DIR = Path(__file__).resolve().parent.parent / 'web'
 
@@ -234,11 +235,78 @@ class AddProjectBody(BaseModel):
     path: str
 
 
-def create_app(initial_mains=(), port=8080):
+class GitPathsBody(BaseModel):
+    paths: list[str]
+
+
+class GitCommitBody(BaseModel):
+    message: str
+    paths: list[str] | None = None
+
+
+class ProofCheckBody(BaseModel):
+    lang: str = 'en-US'
+    block_ids: list[str] | None = None
+
+
+class ProofDictBody(BaseModel):
+    word: str
+
+
+class ProofIgnoreBody(BaseModel):
+    rule: str
+    text: str
+
+
+def _parse_bbl(text):
+    """Split a .bbl into (key, label, raw_body) triples, in reference order."""
+    text = re.sub(r'(?<!\\)%.*', '', text)  # strip comments
+    pattern = re.compile(r'\\bibitem(?:\[([^\]]*)\])?\{([^}]+)\}')
+    matches = list(pattern.finditer(text))
+    out = []
+    for k, m in enumerate(matches):
+        start = m.end()
+        end = matches[k + 1].start() if k + 1 < len(matches) else \
+            text.find('\\end{thebibliography}', start)
+        if end < 0:
+            end = len(text)
+        out.append((m.group(2).strip(), m.group(1), text[start:end]))
+    return out
+
+
+def _latex_clean(s):
+    """Strip braces and resolve common accents for display strings."""
+    s = s.replace('~', ' ')
+    for a, b in (('\\"a', 'ä'), ('\\"o', 'ö'), ('\\"u', 'ü'), ('\\"A', 'Ä'),
+                 ('\\"O', 'Ö'), ('\\"U', 'Ü'), ("\\'a", 'á'), ("\\'e", 'é'),
+                 ("\\'i", 'í'), ("\\'o", 'ó'), ("\\'u", 'ú'), ('\\`e', 'è'),
+                 ('\\`a', 'à'), ('\\^o', 'ô'), ('\\^e', 'ê'), ('\\~n', 'ñ'),
+                 ('\\ss', 'ß'), ('\\c{c}', 'ç')):
+        s = s.replace(a, b)
+    return s.replace('{', '').replace('}', '').strip()
+
+
+def _tex_plain(s):
+    """Light LaTeX → plain text conversion for reference tooltips."""
+    s = re.sub(r'\\newblock\s*', ' ', s)
+    s = re.sub(r'\\href\s*\{[^}]*\}\s*\{([^}]*)\}', r'\1', s)
+    s = re.sub(r'\\(?:emph|textit|textbf|texttt|textsc|mbox|text|url|textrm)\s*\{([^{}]*)\}', r'\1', s)
+    for a, b in (('\\&', '&'), ('\\%', '%'), ('\\_', '_'), ('\\$', '$'),
+                 ('\\{', '{'), ('\\}', '}')):
+        s = s.replace(a, b)
+    s = re.sub(r'\\[a-zA-Z]+\*?\s*', '', s)   # remaining bare commands out
+    s = s.replace('{', '').replace('}', '')
+    s = re.sub(r'---?', '–', s)               # en/em dashes
+    s = re.sub(r'\s+', ' ', s).strip()
+    return _latex_clean(s)
+
+
+def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
     app = FastAPI(title='texperiment')
     projects = {}          # pid -> Project
     clients = set()        # websockets
     loop = None
+    proof_eng = proof.ENGINES[proof_engine]()
 
     def broadcast(msg):
         async def _send():
@@ -308,6 +376,8 @@ def create_app(initial_mains=(), port=8080):
             raise HTTPException(404, 'block not found (document changed?)')
         except ConflictError as e:
             raise HTTPException(409, str(e))
+        except GitError as e:
+            raise HTTPException(400, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
         except FileNotFoundError as e:
@@ -401,7 +471,152 @@ def create_app(initial_mains=(), port=8080):
         _run(get_project(pid).store.raw_put, body.path, body.source)
         return {'ok': True, 'doc': get_project(pid).store.doc}
 
+    # -- git integration --------------------------------------------------------
+    def _git_status_payload(proj):
+        st = _run(gitops.status, proj.store.root)
+        st['repo'] = True
+        return st
+
+    @app.get('/api/project/{pid}/git/status')
+    def git_status_route(pid: str):
+        proj = get_project(pid)
+        top, _ = _run(gitops.find_repo, proj.store.root)
+        if top is None:
+            return {'repo': False}
+        return _git_status_payload(proj)
+
+    @app.post('/api/project/{pid}/git/init')
+    def git_init_route(pid: str):
+        proj = get_project(pid)
+        _run(gitops.init, proj.store.root)
+        return {'ok': True, 'status': _git_status_payload(proj)}
+
+    @app.get('/api/project/{pid}/git/diff')
+    def git_diff_route(pid: str, path: str, staged: bool = False):
+        text = _run(gitops.diff, get_project(pid).store.root, path, staged)
+        return {'path': path, 'text': text}
+
+    @app.post('/api/project/{pid}/git/stage')
+    def git_stage_route(pid: str, body: GitPathsBody):
+        _run(gitops.stage, get_project(pid).store.root, body.paths)
+        return {'ok': True, 'status': _git_status_payload(get_project(pid))}
+
+    @app.post('/api/project/{pid}/git/unstage')
+    def git_unstage_route(pid: str, body: GitPathsBody):
+        _run(gitops.unstage, get_project(pid).store.root, body.paths)
+        return {'ok': True, 'status': _git_status_payload(get_project(pid))}
+
+    @app.post('/api/project/{pid}/git/discard')
+    def git_discard_route(pid: str, body: GitPathsBody):
+        proj = get_project(pid)
+        _run(gitops.discard, proj.store.root, body.paths)
+        # the worktree changed underneath us — re-parse and push a reload
+        proj.store.rebuild()
+        broadcast({'type': 'reload', 'project': proj.id, 'doc': proj.store.doc})
+        return {'ok': True, 'status': _git_status_payload(proj)}
+
+    @app.post('/api/project/{pid}/git/commit')
+    def git_commit_route(pid: str, body: GitCommitBody):
+        if not body.message.strip():
+            raise HTTPException(400, 'commit message is empty')
+        summary = _run(gitops.commit, get_project(pid).store.root,
+                       body.message.strip(), body.paths)
+        return {'ok': True, 'summary': summary,
+                'status': _git_status_payload(get_project(pid))}
+
+    @app.post('/api/project/{pid}/git/push')
+    def git_push_route(pid: str):
+        _run(gitops.push, get_project(pid).store.root)
+        return {'ok': True, 'status': _git_status_payload(get_project(pid))}
+
+    @app.get('/api/project/{pid}/git/changes')
+    def git_changes_route(pid: str):
+        ids = _run(gitops.changed_block_ids, get_project(pid).store)
+        return {'ids': ids, 'count': len(ids)}
+
+    # -- proofreading -----------------------------------------------------------
+    @app.get('/api/project/{pid}/proof/config')
+    def proof_config_route(pid: str):
+        get_project(pid)
+        ok, err = proof_eng.available()
+        return {'engine': proof_eng.name, 'available': ok, 'error': err}
+
+    @app.post('/api/project/{pid}/proof/check')
+    def proof_check_route(pid: str, body: ProofCheckBody):
+        if not body.lang:
+            raise ValueError('lang is required')
+        ids = set(body.block_ids) if body.block_ids else None
+        issues = _run(proof.check_blocks, get_project(pid).store,
+                      proof_eng, body.lang, ids)
+        return {'issues': issues, 'count': len(issues)}
+
+    @app.post('/api/project/{pid}/proof/dictionary')
+    def proof_dict_route(pid: str, body: ProofDictBody):
+        root = get_project(pid).store.root
+        words = _run(proof.add_to_dictionary, root, body.word)
+        return {'ok': True, 'words': words}
+
+    @app.post('/api/project/{pid}/proof/ignore')
+    def proof_ignore_route(pid: str, body: ProofIgnoreBody):
+        root = get_project(pid).store.root
+        _run(proof.add_ignore, root, body.rule, body.text)
+        return {'ok': True}
+
+    # -- undo / redo --------------------------------------------------------------
+    def _history_flags(proj):
+        h = proj.store.history
+        return {'can_undo': bool(h['undo']), 'can_redo': bool(h['redo']),
+                'undo_label': h['undo'][-1]['label'] if h['undo'] else '',
+                'redo_label': h['redo'][-1]['label'] if h['redo'] else ''}
+
+    @app.get('/api/project/{pid}/history')
+    def history_route(pid: str):
+        return _history_flags(get_project(pid))
+
+    def _history_op_route(pid, op):
+        proj = get_project(pid)
+        label = _run(op, proj.store)
+        if label is None:
+            return {'ok': False, 'noop': True, **_history_flags(proj)}
+        # files changed on disk — push a reload like the git discard route
+        broadcast({'type': 'reload', 'project': proj.id, 'doc': proj.store.doc})
+        return {'ok': True, 'label': label, 'doc': proj.store.doc,
+                **_history_flags(proj)}
+
+    @app.post('/api/project/{pid}/undo')
+    def undo_route(pid: str):
+        return _history_op_route(pid, lambda store: store.op_undo())
+
+    @app.post('/api/project/{pid}/redo')
+    def redo_route(pid: str):
+        return _history_op_route(pid, lambda store: store.op_redo())
+
     # -- LaTeX compilation -------------------------------------------------------
+    def _latexmk_outdir(root):
+        """$out_dir from the project's latexmkrc (or .latexmkrc), if any."""
+        for name in ('latexmkrc', '.latexmkrc'):
+            p = Path(root) / name
+            if p.exists():
+                try:
+                    text = p.read_text(encoding='utf-8', errors='replace')
+                except OSError:
+                    return None
+                m = re.search(r'\$out_dir\s*=\s*[\'"]([^\'"]+)[\'"]', text)
+                if m:
+                    return m.group(1)
+        return None
+
+    def _pdf_path(proj):
+        """Where latexmk leaves the PDF: root, or latexmkrc's out_dir if
+        configured and the file exists there."""
+        main_pdf = proj.store.main_path.with_suffix('.pdf')
+        out_dir = _latexmk_outdir(proj.store.root)
+        if out_dir:
+            cand = proj.store.root / out_dir / (main_pdf.name)
+            if cand.exists():
+                return cand
+        return main_pdf
+
     @app.post('/api/project/{pid}/compile')
     def compile_project(pid: str):
         proj = get_project(pid)
