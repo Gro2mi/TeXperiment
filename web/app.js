@@ -2594,7 +2594,7 @@ async function refreshProjects(preferId) {
   } else if (!state.projects.some(p => p.id === state.project)) {
     state.project = state.projects.length ? state.projects[0].id : null;
   }
-  if (state.project) await refreshDoc();
+  if (state.project) { state.restorePos = true; await refreshDoc(); }
   else { state.doc = null; renderAll(); }
 }
 
@@ -2610,6 +2610,7 @@ function switchProject(pid) {
   // proof issues are document-specific
   state.proof.issues = [];
   state.proof.checked = false;
+  state.restorePos = true;
   refreshDoc().then(() => {
     // auto-check only once the new document is in state — otherwise
     // results would be mapped onto the previous project's blocks
@@ -3698,6 +3699,35 @@ function updateHighlights(doc, fromDisk) {
   state.diskKeys = new Set(keys);
 }
 
+// ---- reading position (per project, survives reloads) ----------------
+function posKey() {
+  const p = state.projects.find(x => x.id === state.project);
+  // key by main-file path: project ids change across server restarts
+  return p ? 'readpos:' + p.main : null;
+}
+function saveReadPos() {
+  if (!state.doc || !state.project) return;
+  const k = posKey();
+  if (!k) return;
+  const el = [...document.querySelectorAll('#content .block')]
+    .find(n => n.getBoundingClientRect().bottom > 0);
+  if (!el || !el.dataset.id) return;
+  const off = Math.max(0, -el.getBoundingClientRect().top);
+  try { localStorage.setItem(k, JSON.stringify({id: el.dataset.id, off})); }
+  catch (e) { /* storage full/blocked — position memory is best-effort */ }
+}
+function restoreReadPos() {
+  const k = posKey();
+  if (!k) return;
+  let pos = null;
+  try { pos = JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) {}
+  if (!pos || !pos.id) return;
+  const el = document.querySelector('#content .block[data-id="' + pos.id + '"]');
+  if (!el) return; // document changed too much since the last visit
+  const content = $('#content');
+  content.scrollTop += el.getBoundingClientRect().top + (pos.off || 0);
+}
+
 function applyDoc(doc, fromDisk = false) {
   updateHighlights(doc, fromDisk);
   // keep an open editor alive if its block still exists unchanged on disk
@@ -3742,7 +3772,11 @@ function applyDoc(doc, fromDisk = false) {
   // saves and external reloads both change what git sees — debounce so a
   // burst of saves doesn't fire a git subprocess per keystroke
   scheduleGitRefresh();
-  refreshHistory(); // cheap in-memory flags — keep undo/redo current
+  refreshHistory();
+  if (state.restorePos) {
+    state.restorePos = false;
+    restoreReadPos(); // jump back to the last reading position
+  } // cheap in-memory flags — keep undo/redo current
 }
 
 async function refreshDoc() {
@@ -3859,10 +3893,14 @@ connectWS();
   setupToggle('proofHead', 'proofpanel', 'sb-proof-collapsed');
   // track reading position for the outline highlight
   let scrollTimer = null;
+  let posTimer = null;
   $('#content').addEventListener('scroll', () => {
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(updateOutlineCurrent, 120);
+    clearTimeout(posTimer);
+    posTimer = setTimeout(saveReadPos, 800);
   });
+  window.addEventListener('beforeunload', saveReadPos);
   try {
     state.projects = await api('/api/projects');
   } catch (e) { /* server error shown via refresh */ }
