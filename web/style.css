@@ -400,6 +400,9 @@ body.drag-active .grip { pointer-events: none; }
   box-decoration-break: clone;
 -webkit-box-decoration-break: clone;
 }
+.git-add + .git-del {
+  margin-left: 4px;
+}
 .git-del {
   background: var(--git-del-bg);
   color: var(--git-del-ink);
