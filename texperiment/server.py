@@ -381,6 +381,24 @@ def _latex_clean(s):
     return s.replace('{', '').replace('}', '').strip()
 
 
+def _entry_url(raw):
+    r"""First usable URL of a bbl entry: \url / \href argument, a bare
+    https URL, or a DOI (converted to its https://doi.org form)."""
+    m = re.search(r'\\url\{([^{}]+)\}', raw)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r'\\href\{([^{}]+)\}', raw)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r'https?://[^\s\\%]+', raw)
+    if m:
+        return m.group(0).rstrip('.,;)')
+    m = re.search(r'\b(10\.[0-9]{4,9}/[^\s\\]+)', raw)
+    if m:
+        return 'https://doi.org/' + m.group(1).rstrip('.,;)')
+    return None
+
+
 def _tex_plain(s):
     """Light LaTeX → plain text conversion for reference tooltips."""
     s = re.sub(r'\\newblock\s*', ' ', s)
@@ -806,6 +824,7 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
                 else:
                     authors = clean
             entries.append({'key': key, 'num': num, 'label': _latex_clean(label or ''),
+                            'url': _entry_url(raw),
                             'authors': authors, 'year': year,
                             'plain': _tex_plain(raw)})
         # natbib author-year styles emit \bibitem[Author(Year)]{key};

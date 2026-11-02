@@ -2844,6 +2844,15 @@ function showCitePopup(span) {
     item.append(el('div', 'citekey', bib.style === 'numeric'
       ? '[' + e.num + '] ' + esc(k) : esc(k)));
     item.append(el('div', 'citetext', esc(e.plain)));
+    if (e.url && /^https?:/i.test(e.url)) {
+      const link = el('a', 'citelink', 'Open paper ↗');
+      link.href = e.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.title = e.url;
+      link.onclick = ev => ev.stopPropagation();
+      item.append(link);
+    }
     pop.append(item);
   }
   if (!shown) return;
