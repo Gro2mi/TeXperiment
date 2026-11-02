@@ -159,7 +159,116 @@ function readGroup(s, pos) {
   return null;
 }
 
+/* siunitx inside math: KaTeX doesn't know \SI/\ang/\num/\si — expand them
+   into plain math (value + \mathrm{unit}) before handing the tex to KaTeX */
+
+const SI_UNIT_MATH = {
+  metre: 'm', meter: 'm', kilometre: 'km', kilometer: 'km',
+  centimetre: 'cm', centimeter: 'cm', millimetre: 'mm', millimeter: 'mm',
+  micrometre: '\\mu\\mathrm{m}', micrometer: '\\mu\\mathrm{m}',
+  nanometre: 'nm', nanometer: 'nm',
+  gram: 'g', kilogram: 'kg', milligram: 'mg', tonne: 't',
+  second: 's', millisecond: 'ms', minute: 'min', hour: 'h', day: 'd',
+  ampere: 'A', volt: 'V', ohm: '\\Omega', kelvin: 'K',
+  degreeCelsius: '^\\circ\\mathrm{C}', mole: 'mol', candela: 'cd',
+  newton: 'N', pascal: 'Pa', hectopascal: 'hPa', kilopascal: 'kPa',
+  bar: 'bar', joule: 'J', kilojoule: 'kJ', electronvolt: 'eV',
+  watt: 'W', kilowatt: 'kW', megawatt: 'MW', hertz: 'Hz', coulomb: 'C',
+  tesla: 'T', litre: 'L', liter: 'L',
+  metrePerSecond: 'm/s', metrePerSecondSquared: 'm/s^{2}',
+  percent: '\\%', degree: '^\\circ',
+};
+const SI_PREFIX_MATH = { kilo: 'k', hecto: 'h', deci: 'd', centi: 'c',
+  milli: 'm', micro: '\\mu', nano: 'n', mega: 'M', giga: 'G', tera: 'T' };
+
+// siunitx unit string → KaTeX math fragment ("m\\,s^{-1}" style)
+// siunitx unit string → KaTeX math fragment ("m\\,s^{-1}" style)
+function siUnitToMath(u) {
+  const parts = [];   // {sym, exp, kind} — kind: 'unit' | 'raw' | 'lit'
+  let prefix = '';    // pending siunitx prefix (\\kilo + \\metre → km)
+  let inv = 0;        // pending \\per depth
+  let i = 0;
+
+  const pushRaw = sym => parts.push({sym, exp: 1, kind: 'raw'});
+  const pushLit = chunk => {
+    const last = parts[parts.length - 1];
+    if (last && last.kind === 'lit') last.sym += chunk;
+    else parts.push({sym: chunk, exp: 1, kind: 'lit'});
+  };
+  const pushSym = sym => {
+    if (sym.startsWith('^')) { pushRaw(sym); return; }   // \\degree etc.
+    parts.push({sym: prefix + sym, exp: inv > 0 ? -inv : 1, kind: 'unit'});
+    prefix = '';
+    inv = 0;
+  };
+
+  while (i < u.length) {
+    if (u[i] === '\\') {
+      const m = /^\\([a-zA-Z]+)/.exec(u.slice(i));
+      if (!m) { pushLit(u.slice(i, i + 2)); i += 2; continue; }
+      const name = m[1];
+      i += m[0].length;
+      if (name === 'per') { inv++; continue; }
+      if (name === 'squared' || name === 'cubic') {
+        const mult = name === 'squared' ? 2 : 3;
+        const last = parts[parts.length - 1];
+        if (last && last.kind === 'unit') last.exp *= mult;
+        continue;
+      }
+      if (SI_PREFIX_MATH[name]) { prefix += SI_PREFIX_MATH[name]; continue; } // \kilo + \\metre → km
+      pushSym(SI_UNIT_MATH[name] ?? name);      continue;
+    }
+    let j = i;
+    while (j < u.length && u[j] !== '\\') j++;
+    pushLit(u.slice(i, j));
+    i = j;
+  }
+
+  return parts.map((p, ix) => {
+    const piece = p.kind === 'raw' ? p.sym
+      : p.sym + (p.exp === 1 ? '' : '^{' + p.exp + '}');
+    const prev = parts[ix - 1];
+    return ix && prev.kind === 'unit' && p.kind === 'unit' ? '\\,' + piece : piece;
+  }).join('').replace(/^(\^)/, '{}$1') || u;
+}
+
+function mathGroupDigits(s) {
+  return groupDigits(s).replace(/\u2009/g, '\\,');
+}
+
+// rewrite \SI/\qty/\si/\ang/\num inside math into KaTeX-native tex;
+// returns the input untouched when anything looks malformed
+function expandSiunitxMath(tex) {
+  const re = /\\(SI|qty|si|ang|num)(?![a-zA-Z])/g;
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(tex))) {
+    let j = m.index + m[0].length;
+    while (tex[j] === '[') {           // optional siunitx options — skip
+      const e = findUnescaped(tex, j, ']');
+      if (e < 0) return tex;
+      j = e + 1;
+    }
+    const two = (m[1] === 'SI' || m[1] === 'qty');
+    const gs = readGroups(tex, j, two ? 2 : 1);
+    if (!gs) return tex;
+    const g1 = gs.groups[0];
+    const g2 = gs.groups[1];
+    let rep;
+    if (m[1] === 'si') rep = '\\mathrm{' + siUnitToMath(g1) + '}';
+    else if (m[1] === 'ang') rep = '{' + g1 + '}^{\\circ}';
+    else if (m[1] === 'num') rep = '{' + mathGroupDigits(g1) + '}';
+    else rep = '{' + mathGroupDigits(g1) + '}\\,\\mathrm{' + siUnitToMath(g2) + '}';
+    out += tex.slice(last, m.index) + rep;
+    last = gs.end;
+    re.lastIndex = gs.end;
+  }
+  return out + tex.slice(last);
+}
+
 function katexSpan(tex, display) {
+  tex = expandSiunitxMath(tex);
   if (typeof katex === 'undefined') return `<code class="kerr">${esc(tex)}</code>`;
   try {
     return katex.renderToString(tex,
