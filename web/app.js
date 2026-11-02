@@ -2982,7 +2982,26 @@ function renderGit() {
 
 function gitFileGroup(title, paths, kind) {
   const wrap = el('div', 'gitgroup');
-  wrap.append(el('div', 'gitgrouphead', `${title} (${paths.length})`));
+  const head = el('div', 'gitgrouphead');
+  head.append(el('span', '', `${title} (${paths.length})`));
+  const hbtns = el('span', 'ghbtns');
+  const hbtn = (label, tip, fn) => {
+    const b2 = el('button', 'gbtn', label);
+    b2.title = tip;
+    b2.onclick = e2 => { e2.stopPropagation(); fn(); };
+    hbtns.append(b2);
+  };
+  if (kind === 'staged') {
+    hbtn('⇤', 'Unstage all files', () => gitPaths('unstage', paths.slice()));
+  } else if (kind === 'unstaged') {
+    hbtn('⧉', 'View the combined diff of all changed files',
+      () => openGitDiffAll(false));
+    hbtn('＋', 'Stage all changed files', () => gitPaths('stage', paths.slice()));
+    hbtn('↩', 'Discard ALL changes (asks for confirmation)',
+      () => gitDiscard(paths.slice()));
+  }
+  head.append(hbtns);
+  wrap.append(head);
   for (const p of paths) {
     const row = el('div', 'gitrow');
     const name = el('span', 'gitpath', esc(p));
@@ -2999,7 +3018,7 @@ function gitFileGroup(title, paths, kind) {
       row.append(mk('−', 'Unstage', () => gitPaths('unstage', [p])));
     } else {
       row.append(mk('⧉', 'View diff', () => openGitDiff(p, false)));
-      if (kind === 'unstaged') row.append(mk('↩', 'Discard changes', () => gitDiscard(p)));
+      if (kind === 'unstaged') row.append(mk('↩', 'Discard changes', () => gitDiscard([p])));
       row.append(mk('+', 'Stage', () => gitPaths('stage', [p])));
     }
     wrap.append(row);
@@ -3019,16 +3038,23 @@ async function gitPaths(op, paths) {
   } catch (e) { toast(`Git ${op} failed: ` + e.message, true); }
 }
 
-async function gitDiscard(p) {
-  if (!confirm(`Discard all uncommitted changes in "${p}"?\nThis cannot be undone.`)) return;
+async function gitDiscard(paths) {
+  // a project inside a subdirectory of its repo may see foreign files in
+  // the status (paths are repo-relative) - never offer those for discard;
+  // the server enforces the same filter via its root prefix
+  const pfx = (state.git && state.git.prefix) || '';
+  if (pfx) paths = paths.filter(x => x.startsWith(pfx));
+  const list = paths.slice(0, 8).join('\n') + (paths.length > 8 ? '\n…' : '');
+  if (!confirm(`Discard ALL uncommitted changes in ${paths.length} file(s)?\n\n${list}\n\nThis cannot be undone.`)) return;
   try {
-    const res = await ppost('/git/discard', {paths: [p]});
+    const res = await ppost('/git/discard', {paths});
     state.git = res.status;
     await fetchGitChanges();
     renderGit();
     applyGitHighlights();
     applyOutlineGitMarks();
     refreshDoc(); // the worktree changed underneath us
+    toast(paths.length === 1 ? 'Changes discarded' : `Discarded changes in ${paths.length} files`);
   } catch (e) { toast('Discard failed: ' + e.message, true); }
 }
 
@@ -3098,12 +3124,22 @@ function renderDiffText(text) {
   }).join('');
 }
 
+async function openGitDiffAll(staged) {
+  return openGitDiffModal(staged ? 'All staged changes' : 'All changes',
+    `/git/diff-all?staged=${staged ? 1 : 0}`);
+}
+
 async function openGitDiff(path, staged = false) {
+  return openGitDiffModal((staged ? 'Staged changes — ' : 'Changes — ') + path,
+    `/git/diff?path=${encodeURIComponent(path)}&staged=${staged ? 1 : 0}`);
+}
+
+async function openGitDiffModal(title, url) {
   const modal = $('#gitmodal');
   modal.classList.remove('hidden');
   modal.innerHTML = '';
   const wrap = el('div', 'gitdiffwrap');
-  wrap.append(el('h3', '', (staged ? 'Staged changes — ' : 'Changes — ') + esc(path)));
+  wrap.append(el('h3', '', esc(title)));
   const pre = el('pre', 'gitdiffpre', 'loading…');
   wrap.append(pre);
   const bar = el('div', 'edbar');
@@ -3123,7 +3159,7 @@ async function openGitDiff(path, staged = false) {
   modal.addEventListener('click', e => { if (e.target === modal) close(); });
 
   try {
-    const res = await papi(`/git/diff?path=${encodeURIComponent(path)}&staged=${staged ? 1 : 0}`);
+    const res = await papi(url);
     pre.innerHTML = renderDiffText(res.text);
   } catch (e) {
     pre.textContent = 'Failed to load diff: ' + e.message;
@@ -3910,6 +3946,8 @@ connectWS();
   refreshBib();
   initProofHover();
   watchMathLibs();
+  // keep the source-control panel current even without local edits
+  setInterval(() => { if (state.project && !document.hidden) refreshGit(); }, 30000);
   $('#undobtn').addEventListener('click', doUndo);
   $('#redobtn').addEventListener('click', doRedo);
   $('#themebtn').addEventListener('click', () =>

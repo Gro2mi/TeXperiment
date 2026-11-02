@@ -475,9 +475,13 @@ body.drag-active .grip { pointer-events: none; }
 .gtoggle:hover { filter: brightness(1.15); }
 .gitgroup { margin: 0 0 2px; }
 .gitgrouphead {
+  display: flex; align-items: center; gap: 4px;
   font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
-  color: #7a8290; padding: 5px 16px 2px;
+  color: #7a8290; padding: 5px 8px 2px 16px;
 }
+.gitgrouphead span:first-child { flex: 1; }
+.ghbtns { display: flex; gap: 1px; }
+.ghbtns .gbtn { font-size: 12px; padding: 1px 5px; }
 .gitrow {
   display: flex; align-items: center; padding: 1px 8px 1px 16px;
 }

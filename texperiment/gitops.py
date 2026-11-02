@@ -58,7 +58,11 @@ def _norm(path):
 
 
 def status(root):
-    """Parse `git status --porcelain -b` into a UI-friendly payload."""
+    """Parse `git status --porcelain -b` into a UI-friendly payload.
+    Scoped to the project's own subtree, with project-relative paths:
+    a project inside a subdirectory of its repo never sees (or offers
+    to modify) files outside its own folder."""
+    _top, prefix = find_repo(root)
     out = _run(root, 'status', '--porcelain', '-b', '--untracked-files=normal')
     lines = out.splitlines()
     res = {'branch': None, 'ahead': 0, 'behind': 0, 'has_remote': False,
@@ -87,6 +91,10 @@ def status(root):
         if len(line) < 4:
             continue
         x, y, path = line[0], line[1], _norm(line[3:])
+        if prefix:
+            if not path.startswith(prefix):
+                continue  # another project's file inside this repo
+            path = path[len(prefix):]
         if path.endswith('.bak'):
             continue  # our own session backups, not project content
         if x == '?' and y == '?':
@@ -116,20 +124,43 @@ def diff(root, path, staged=False):
     return ''
 
 
+def _cwd_rel(root, paths):
+    """Client paths are project-relative (as reported by status()); when
+    the project sits in a repo subdirectory, older clients may still send
+    repo-relative paths - map both onto cwd-relative pathspecs."""
+    _top, prefix = find_repo(root)
+    out = []
+    for p2 in paths:
+        out.append(p2[len(prefix):] if prefix and p2.startswith(prefix) else p2)
+    return out
+
+
 def stage(root, paths):
     if paths:
-        _run(root, 'add', '--', *paths)
+        _run(root, 'add', '--', *_cwd_rel(root, paths))
 
 
 def unstage(root, paths):
     if paths:
-        _run(root, 'reset', 'HEAD', '--', *paths)
+        _run(root, 'reset', 'HEAD', '--', *_cwd_rel(root, paths))
 
 
 def discard(root, paths):
-    """Dangerous: reverts the given paths to their staged/HEAD content."""
-    if paths:
-        _run(root, 'checkout', '--', *paths)
+    """Dangerous: reverts the given paths to their staged/HEAD content.
+    Paths are repo-relative; when the project lives in a subdirectory of
+    its repo, files outside the project subtree are skipped — a group
+    discard from one project must never touch another project's files."""
+    if not paths:
+        return
+    _top, prefix = find_repo(root)
+    # pathspecs resolve against cwd (= the project root), so foreign
+    # repo-relative paths simply fail loudly instead of touching files
+    # outside the project; repo-relative paths of our own files are
+    # converted down to the project root
+    inside = [p2[len(prefix):] if prefix and p2.startswith(prefix) else p2
+              for p2 in paths]
+    if inside:
+        _run(root, 'checkout', '--', *inside)
 
 
 def commit(root, message, paths=None):
@@ -138,6 +169,12 @@ def commit(root, message, paths=None):
     _run(root, 'commit', '-m', message)
     out = _run(root, 'log', '-1', '--format=%h %s')
     return out.strip()
+
+
+def diff_all(root, staged=False):
+    """Combined diff of every changed file: working tree vs index
+    (unstaged) or index vs HEAD (staged)."""
+    return _run(root, 'diff', '--cached') if staged else _run(root, 'diff')
 
 
 def push(root):

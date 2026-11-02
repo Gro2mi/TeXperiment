@@ -590,6 +590,11 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
     def _git_status_payload(proj):
         st = _run(gitops.status, proj.store.root)
         st['repo'] = True
+        # repo-relative prefix of the project inside its repo ('' when
+        # the project root IS the repo root); the client scopes
+        # destructive group operations to the project's own files
+        _top, prefix = _run(gitops.find_repo, proj.store.root)
+        st['prefix'] = prefix or ''
         return st
 
     @app.get('/api/project/{pid}/git/status')
@@ -610,6 +615,11 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
     def git_diff_route(pid: str, path: str, staged: bool = False):
         text = _run(gitops.diff, get_project(pid).store.root, path, staged)
         return {'path': path, 'text': text}
+
+    @app.get('/api/project/{pid}/git/diff-all')
+    def git_diff_all_route(pid: str, staged: bool = False):
+        text = _run(gitops.diff_all, get_project(pid).store.root, staged)
+        return {'text': text}
 
     @app.post('/api/project/{pid}/git/stage')
     def git_stage_route(pid: str, body: GitPathsBody):
