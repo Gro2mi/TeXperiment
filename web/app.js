@@ -2890,6 +2890,9 @@ function toggleGitHl() {
   state.gitHl = !state.gitHl;
   applyGitHighlights();
   renderGit();
+  // the inline green/red marks and ghost rows live in the rendered
+  // blocks - a class toggle alone cannot remove them
+  rerenderContentPreservingScroll();
 }
 
 function toggleDiffOnly() {
