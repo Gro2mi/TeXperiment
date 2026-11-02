@@ -2146,7 +2146,7 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
   const headerBtn = mkBtn('▤ Header rules', 'Apply the canonical booktabs pattern: toprule above the first row, midrule below it, bottomrule at the end', toggleHeader);
   tools.append(
     headerBtn,
-    mkBtn('+ Row', 'Insert a row at the selection', () => ops.addRow(sel.r)),
+    mkBtn('+ Row', 'Insert a row below the selection', () => ops.addRow(sel.r + 1)),
     mkBtn('+ Col', 'Insert a column at the selection', () => ops.addCol(sel.c)),
     mkBtn('− Row', 'Delete the selected row', () => ops.delRow(sel.r)),
     mkBtn('− Col', 'Delete the selected column', () => ops.delCol(sel.c)),
@@ -2328,7 +2328,7 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
         ' (click cycles rule / hline / none)', () => cycleRuleBelow(r));
       if (rulesAt(r + 1).length) ruleBtn.classList.add('onrule');
       btns.append(
-        gutterBtn('＋', 'Insert row above', () => ops.addRow(r)),
+        gutterBtn('＋', 'Insert row below', () => ops.addRow(r + 1)),
         gutterBtn('✕', 'Delete row', () => ops.delRow(r)),
         ruleBtn,
         gutterBtn('↑', 'Move row up', () => ops.moveRow(r, -1)),
