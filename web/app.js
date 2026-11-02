@@ -1622,6 +1622,10 @@ function closeEditor() {
   state.edit = null;
   if (b) rerenderBlock(b);
   closeOrphanAutocomplete(); // popups die with their editor (no blur event)
+  if (state._pendingDiffRerender) {
+    state._pendingDiffRerender = false;
+    rerenderContentPreservingScroll();
+  }
 }
 
 function openEditor(b) {
@@ -3474,6 +3478,12 @@ function dropProofIssue(issue) {
 
 // re-render the content area without losing the reading position
 function rerenderContentPreservingScroll() {
+  if (state.edit) {
+    // an open editor would be torn down by a full re-render - defer
+    // until it is closed (closeEditor flushes this)
+    state._pendingDiffRerender = true;
+    return;
+  }
   const content = $('#content');
   const firstVisible = [...document.querySelectorAll('.block')]
     .find(n => n.getBoundingClientRect().bottom > 0);
