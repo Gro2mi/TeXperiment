@@ -15,8 +15,8 @@ const state = {
   collapsed: new Set(), // section block ids hidden via their chevron
   git: null,         // last /git/status payload (null = not fetched yet)
   gitChanged: new Set(), // block ids whose content differs from git HEAD
-  gitHl: true,       // highlight changed blocks in the document
-  gitShowDiff: false, // show only changed blocks
+  gitHl: localStorage.getItem('git-hl') !== '0',  // highlight changes (persisted)
+  gitShowDiff: localStorage.getItem('git-show-diff') === '1', // persisted
   proof: {           // proofreading state
     config: null,    // /proof/config payload (engine availability)
     issues: [],
@@ -2997,6 +2997,7 @@ async function refreshGit() {
 
 function toggleGitHl() {
   state.gitHl = !state.gitHl;
+  localStorage.setItem('git-hl', state.gitHl ? '1' : '0');
   applyGitHighlights();
   renderGit();
   // the inline green/red marks and ghost rows live in the rendered
@@ -3006,6 +3007,7 @@ function toggleGitHl() {
 
 function toggleDiffOnly() {
   state.gitShowDiff = !state.gitShowDiff;
+  localStorage.setItem('git-show-diff', state.gitShowDiff ? '1' : '0');
   // preserve the reading position across the re-render
   const content = $('#content');
   const firstVisible = [...document.querySelectorAll('.block')]
