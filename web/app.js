@@ -504,6 +504,250 @@ function labelChips(labels) {
   return labels.map(l => `<span class="chip">label:${esc(l)}</span>`).join(' ');
 }
 
+/* ------------------------------------------------------------------ */
+/* rich table model: parse/serialize real tables (wrapper, booktabs,   */
+/* tabularx, captions) so the grid editor can open them                */
+/* ------------------------------------------------------------------ */
+
+const TABLE_RULE_CMDS = new Set(['toprule', 'midrule', 'bottomrule',
+  'hline', 'cline', 'cmidrule']);
+
+// end index just past the balanced {...} group starting at s[i] == '{'
+function groupEndAt(s, i) {
+  let d = 0;
+  for (let k = i; k < s.length; k++) {
+    if (s[k] === '\\') { k++; continue; }
+    if (s[k] === '{') d++;
+    else if (s[k] === '}') { d--; if (!d) return k + 1; }
+  }
+  return -1;
+}
+
+// scan a tabular body into cells / rules / row ends — escape-aware, so
+// `\&` stays in its cell and `\\[1ex]` spacing never leaks into cells
+function tokenizeTableBody(body) {
+  const toks = [];
+  let cur = '';
+  const pushCell = () => { toks.push({t: 'cell', text: cur}); cur = ''; };
+  let i = 0;
+  while (i < body.length) {
+    const c = body[i];
+    if (c === '\\') {
+      if (body[i + 1] === '\\') {
+        pushCell();
+        let spacing = '';
+        const sm = /^\[[^\]]*\]/.exec(body.slice(i + 2));
+        if (sm) { spacing = sm[0]; i += sm[0].length; }
+        toks.push({t: 'rowend', spacing});
+        i += 2;
+        continue;
+      }
+      const m = /^\\([a-zA-Z]+)\*?/.exec(body.slice(i));
+      if (!m) { cur += body.slice(i, i + 2); i += 2; continue; }
+      const cmd = m[1];
+      if (TABLE_RULE_CMDS.has(cmd)) {
+        pushCell();
+        // consume the rule's [..]/{..} arguments verbatim (cline{2-3},
+        // cmidrule(lr){2-3})
+        let j = i + m[0].length;
+        let arg = '';
+        for (;;) {
+          const ws = /^[ \t]*/.exec(body.slice(j));
+          j += ws[0].length;
+          if (body[j] === '[') {
+            const e = body.indexOf(']', j);
+            if (e < 0) break;
+            arg += ws[0] + body.slice(j, e + 1); j = e + 1; continue;
+          }
+          if (body[j] === '{') {
+            const g = groupEndAt(body, j);
+            if (g < 0) break;
+            arg += ws[0] + body.slice(j, g); j = g; continue;
+          }
+          break;
+        }
+        toks.push({t: 'rule', kind: cmd, arg});
+        i = j;
+        continue;
+      }
+      cur += m[0]; i += m[0].length;
+      continue;
+    }
+    if (c === '&') { pushCell(); toks.push({t: 'sep'}); i++; continue; }
+    cur += c; i++;
+  }
+  if (cur.trim() || !toks.length) pushCell();
+  return toks;
+}
+
+const MC_RE = /^\\multicolumn\{(\d+)\}\{([^{}]*)\}\{([\s\S]*)\}$/;
+
+// fold body tokens into rows + boundary rules (`before` = index of the
+// row the rule precedes, 0..rows.length); multicolumn cells become
+// span-annotated, exotic constructs set the advanced flag
+function tableBodyToModel(body) {
+  const rows = [];
+  const rules = [];
+  let cells = [];
+  let spacing = '';
+  let advanced = false;
+  // a lone whitespace-only cell pending before a rule/row end is an
+  // inter-token artifact (e.g. the newline after \toprule), not a cell
+  const dropArtifact = () => {
+    if (cells.length === 1 && !cells[0].text && !cells[0].mc) cells = [];
+  };
+  const flushRow = () => {
+    dropArtifact();
+    if (!cells.length) return;
+    rows.push({cells, spacing});
+    cells = [];
+  };
+  for (const tk of tokenizeTableBody(body)) {
+    if (tk.t === 'cell') {
+      const text = tk.text.trim();
+      const mc = MC_RE.exec(text);
+      if (mc) {
+        cells.push({text: mc[3].trim(), mc: {n: +mc[1], spec: mc[2]}});
+      } else {
+        if (/\\multirow|\\cline/.test(text)) advanced = true;
+        cells.push({text, mc: null});
+      }
+    } else if (tk.t === 'rowend') {
+      spacing = tk.spacing;
+      flushRow();
+    } else if (tk.t === 'rule') {
+      dropArtifact();
+      if (tk.kind === 'cline' || tk.kind === 'cmidrule') advanced = true;
+      // a rule binds to the boundary after the row currently being built
+      // (rows.length + 1 once it flushes), or the next row when none is
+      rules.push({before: rows.length + (cells.length ? 1 : 0),
+        kind: tk.kind, arg: tk.arg});
+    }
+  }
+  flushRow();
+  for (const r of rules) {
+    if (r.before > rows.length) r.before = rows.length;
+  }
+  return {rows, rules, advanced};
+}
+
+// parse a full table block source into the rich model, or null
+function parseTableRich(src) {
+  const s = src.trim();
+  let wrap = null;
+  let inner = s;
+  const wm = /^\\begin\{(table\*?)\}(\[[^\]]*\])?/.exec(s);
+  if (wm) {
+    const endTag = '\\end{' + wm[1] + '}';
+    const endI = s.lastIndexOf(endTag);
+    if (endI < 0) return null;
+    if (s.slice(endI + endTag.length).trim()) return null;
+    wrap = {env: wm[1], pos: wm[2] || '', pre: '', post: ''};
+    inner = s.slice(wm[0].length, endI);
+  }
+  const tm = /\\begin\{(tabularx|tabular\*?|longtable)\*?\}/.exec(inner);
+  if (!tm) return null;
+  const tabEnv = tm[1];
+  let i = tm.index + tm[0].length;
+  const skipWs = () => { while (i < inner.length && inner[i] === ' ') i++; };
+  skipWs();
+  if (inner[i] === '[') {
+    const e = inner.indexOf(']', i);
+    if (e < 0) return null;
+    i = e + 1; skipWs();
+  }
+  let widthArg = null;
+  if (/^(tabularx|tabular\*)$/.test(tabEnv)) {
+    if (inner[i] !== '{') return null;
+    const g = groupEndAt(inner, i);
+    if (g < 0) return null;
+    widthArg = inner.slice(i + 1, g - 1);
+    i = g; skipWs();
+    if (inner[i] === '[') {
+      const e = inner.indexOf(']', i);
+      if (e < 0) return null;
+      i = e + 1; skipWs();
+    }
+  }
+  if (inner[i] !== '{') return null;
+  const cg = groupEndAt(inner, i);
+  if (cg < 0) return null;
+  const colspec = inner.slice(i + 1, cg - 1);
+  const endTag = '\\end{' + tabEnv + '}';
+  const envEnd = inner.indexOf(endTag, cg);
+  if (envEnd < 0) return null;
+  const body = inner.slice(cg, envEnd);
+  const beforeTab = inner.slice(0, tm.index);
+  const afterTab = inner.slice(envEnd + endTag.length);
+
+  const {rows, rules, advanced} = tableBodyToModel(body);
+  if (!rows.length) return null;
+
+  // caption/label sit outside the tabular env; everything else in the
+  // wrapper is preserved verbatim (centering, size commands, vspace)
+  let caption = null;
+  let label = null;
+  const splitMeta = (chunk, pos) => {
+    let out = chunk;
+    const lm = /\\label\{([^{}]*)\}/.exec(out);
+    if (lm) {
+      label = lm[1];
+      out = out.slice(0, lm.index) + out.slice(lm.index + lm[0].length);
+    }
+    const cm = /\\caption(\[[^\]]*\])?\{/.exec(out);
+    if (cm) {
+      const g = readGroup(out, cm.index + cm[0].length - 1);
+      if (g) {
+        caption = {text: g.body, short: cm[1] || null, pos};
+        out = out.slice(0, cm.index) + out.slice(g.end);
+      }
+    }
+    return out;
+  };
+  const preChunk = splitMeta(beforeTab, 'above');
+  const postChunk = splitMeta(afterTab, 'below');
+  if (wrap) {
+    wrap.pre = preChunk.trim();
+    wrap.post = postChunk.trim();
+  } else if (preChunk.trim() || postChunk.trim()) {
+    return null; // stray text around a bare tabular → source editor
+  }
+  return {wrap, tabEnv, widthArg, colspec, rows, rules, caption, label,
+    advanced};
+}
+
+function serializeTableRich(m) {
+  const L = [];
+  const pushMeta = () => {
+    if (m.caption) L.push('\\caption' + (m.caption.short || '') +
+      '{' + m.caption.text + '}');
+    if (m.label) L.push('\\label{' + m.label + '}');
+  };
+  if (m.wrap) L.push('\\begin{' + m.wrap.env + '}' + m.wrap.pos);
+  if (m.wrap && m.wrap.pre) L.push(m.wrap.pre);
+  if (m.caption && m.caption.pos === 'above') pushMeta();
+  L.push('\\begin{' + m.tabEnv + '}' +
+    (m.widthArg ? '{' + m.widthArg + '}' : '') + '{' + m.colspec + '}');
+  const rulesAt = before => (m.rules || [])
+    .filter(r => r.before === before)
+    .map(r => '\\' + r.kind + (r.arg || ''));
+  const head = rulesAt(0);
+  if (head.length) L.push(head.join(' '));
+  m.rows.forEach((row, i) => {
+    const cells = row.cells.map(c => c.mc
+      ? `\\multicolumn{${c.mc.n}}{${c.mc.spec}}{${c.text}}`
+      : c.text);
+    L.push(cells.join(' & ') + ' \\\\' + (row.spacing || ''));
+    const rl = rulesAt(i + 1);
+    if (rl.length) L.push(rl.join(' '));
+  });
+  L.push('\\end{' + m.tabEnv + '}');
+  if (m.caption && m.caption.pos === 'below') pushMeta();
+  if (m.wrap && m.wrap.post) L.push(m.wrap.post);
+  if (m.wrap) L.push('\\end{' + m.wrap.env + '}');
+  return L.join('\n');
+}
+
 function parseTabular(src) {
   const bm = /\\begin\{(tabular\*?)\}/.exec(src);
   if (!bm) return null;
@@ -531,7 +775,7 @@ function parseTabular(src) {
   if (depth) return null;
   const colspec = src.slice(i + 1, j);
   const body = src.slice(j + 1, envEnd);
-  if (/\\(multicolumn|multirow|hline|cline|vline|cellcolor|toprule|midrule|bottomrule)/.test(body)) return null;
+  if (/\\(multicolumn|multirow|hline|cline|cmidrule|vline|cellcolor|toprule|midrule|bottomrule)/.test(body)) return null;
   const rows = body.split(/\\\\/).map(r => r.trim()).filter(Boolean);
   if (!rows.length) return null;
   return {colspec, grid: rows.map(r => r.split('&').map(c => c.trim())), env: bm[1]};
@@ -583,7 +827,8 @@ function parseTabularLenient(src) {
   if (envEnd < 0) return null;
   let body = src.slice(end, envEnd);
   body = body.replace(/\\(toprule|midrule|bottomrule|hline)\b/g, '')
-             .replace(/\\cline\{[^}]*\}/g, '');
+             .replace(/\\cline\{[^}]*\}/g, '')
+             .replace(/\\cmidrule(\([^)]*\))?(\[[^]]*\])?(\{[^}]*\})+/g, '');
   const rows = body.split(/\\\\/).map(r => r.trim()).filter(Boolean);
   if (!rows.length) return null;
   const grid = rows.map(r => r.split('&').map(c => {
@@ -1279,7 +1524,7 @@ function openEditor(b) {
   if (!node) return;
 
   const kind = b.type === 'math' ? 'math'
-    : (b.type === 'table' && parseTabular(b.source) ? 'grid' : 'source');
+    : (b.type === 'table' && parseTableRich(b.source) ? 'grid' : 'source');
   const ed = buildEditor(b, kind);
   node.classList.add('editing');
   node.querySelector('.bcontent').replaceWith(ed.root);
@@ -1731,83 +1976,474 @@ function buildMathEditor(b, ed, bar, commit, cancel) {
 /* ---- table grid editor ---- */
 
 function buildGridEditor(b, ed, bar, commit, cancel) {
-  const parsed = parseTabular(b.source);
-  const grid = parsed.grid.map(r => r.slice());
-  const maxCols = Math.max(...grid.map(r => r.length));
-  grid.forEach(r => { while (r.length < maxCols) r.push(''); });
+  const model = parseTableRich(b.source); // non-null: openEditor gates the kind
+  let sel = {r: 0, c: 0};
+  let pane = 'grid';
 
-  let sel = {r: grid.length - 1, c: maxCols - 1};
+  // ---- logical column helpers (multicolumn cells span several) ----------
+  const rowSpans = row => row.cells.map(c => (c.mc && c.mc.n > 1 ? c.mc.n : 1));
+  const logicalCols = row => rowSpans(row).reduce((a, s) => a + s, 0);
+  const ncols = () => Math.max(1, ...model.rows.map(logicalCols));
+  const cellIndexForCol = (row, c) => {
+    let pos = 0;
+    const spans = rowSpans(row);
+    for (let i = 0; i < spans.length; i++) {
+      if (c < pos + spans[i]) return {i, mid: c > pos};
+      pos += spans[i];
+    }
+    return {i: row.cells.length - 1, mid: false};
+  };
 
-  const gtools = el('div', 'gtools');
-  const mkBtn = (label, fn) => {
+  // ---- structural operations (all keep the selection sensible) ----------
+  const blankCell = () => ({text: '', mc: null});
+  const ops = {
+    addRow: at => {
+      // rules glue to the row they precede: inserting at `at` pushes
+      // every boundary at or below the insert point down by one
+      model.rules.forEach(rl => { if (rl.before >= at) rl.before++; });
+      model.rows.splice(at, 0, {cells: Array(ncols()).fill(null).map(blankCell), spacing: ''});
+      sel = {r: at, c: sel.c};
+      redraw();
+    },
+    delRow: r => {
+      if (model.rows.length <= 1) return;
+      // deleting row r merges its two boundaries: rules that sat below
+      // it move up with the row they precede
+      model.rules.forEach(rl => {
+        if (rl.before === r + 1) rl.before = r;
+        else if (rl.before > r + 1) rl.before--;
+      });
+      model.rows.splice(r, 1);
+      // rules bound past the new end clamp onto the last boundary
+      model.rules.forEach(rl => { if (rl.before > model.rows.length) rl.before = model.rows.length; });
+      sel = {r: Math.min(r, model.rows.length - 1), c: sel.c};
+      redraw();
+    },
+    moveRow: (r, dir) => {
+      const t = r + dir;
+      if (t < 0 || t >= model.rows.length) return;
+      [model.rows[r], model.rows[t]] = [model.rows[t], model.rows[r]];
+      // rules attached to the moving boundary travel with the swap
+      const rb = bIdx => model.rules.filter(x => x.before === bIdx);
+      const lo = Math.min(r, t) + 1, hi = Math.max(r, t) + 1;
+      const a = rb(lo), c2 = rb(hi);
+      a.forEach(x => x.before = hi); c2.forEach(x => x.before = lo);
+      sel = {r: t, c: sel.c};
+      redraw();
+    },
+    addCol: at => {
+      model.rows.forEach(row => {
+        const {i, mid} = cellIndexForCol(row, at);
+        if (mid) {
+          if (row.cells[i].mc) row.cells[i].mc.n++;
+        } else {
+          row.cells.splice(i === -1 ? row.cells.length : i, 0, blankCell());
+        }
+      });
+      sel = {r: sel.r, c: at};
+      redraw();
+    },
+    delCol: c => {
+      if (ncols() <= 1) return;
+      model.rows.forEach(row => {
+        const {i, mid} = cellIndexForCol(row, c);
+        const cell = row.cells[i];
+        if (cell && cell.mc && cell.mc.n > 1) {
+          cell.mc.n--;
+          if (cell.mc.n === 1) cell.mc = null;
+        } else {
+          row.cells.splice(i, 1);
+        }
+        if (!row.cells.length) row.cells.push(blankCell());
+      });
+      sel = {r: sel.r, c: Math.min(c, ncols() - 1)};
+      redraw();
+    },
+    moveCol: (c, dir) => {
+      const t = c + dir;
+      if (t < 0 || t >= ncols()) return;
+      model.rows.forEach(row => {
+        const a = cellIndexForCol(row, c);
+        const bv = cellIndexForCol(row, t);
+        if (a.mid || bv.mid) return; // spans crossing — leave advanced rows alone
+        const [cell] = row.cells.splice(a.i, 1);
+        row.cells.splice(bv.i, 0, cell);
+      });
+      sel = {r: sel.r, c: t};
+      redraw();
+    },
+  };
+
+  // ---- rules -------------------------------------------------------------
+  const rulesAt = bIdx => model.rules.filter(r => r.before === bIdx);
+  const defaultKind = bIdx =>
+    bIdx === 0 ? 'toprule' : (bIdx === model.rows.length ? 'bottomrule' : 'midrule');
+  const cycleKind = (bIdx, kind) => {
+    if (kind === 'cline' || kind === 'cmidrule') return defaultKind(bIdx);
+    if (bIdx === 0) return kind === 'toprule' ? 'hline' : 'toprule';
+    if (bIdx === model.rows.length) return kind === 'bottomrule' ? 'hline' : 'bottomrule';
+    return kind === 'midrule' ? 'hline' : 'midrule';
+  };
+  const headerOn = () =>
+    rulesAt(0).some(r => r.kind === 'toprule') &&
+    rulesAt(1).some(r => r.kind === 'midrule') &&
+    rulesAt(model.rows.length).some(r => r.kind === 'bottomrule');
+  const toggleHeader = () => {
+    const strip = bIdx => {
+      model.rules = model.rules.filter(r =>
+        !(r.before === bIdx && ['toprule', 'midrule', 'bottomrule'].includes(r.kind)));
+    };
+    if (headerOn()) {
+      [0, 1, model.rows.length].forEach(strip);
+    } else {
+      [0, 1, model.rows.length].forEach(strip);
+      model.rules.push({before: 0, kind: 'toprule', arg: ''});
+      model.rules.push({before: 1, kind: 'midrule', arg: ''});
+      model.rules.push({before: model.rows.length, kind: 'bottomrule', arg: ''});
+    }
+    redraw();
+  };
+
+  // ---- panes ---------------------------------------------------------
+  const gridPane = el('div', 'tgrid');
+  const srcPane = el('div', 'tgridsrc hidden');
+  let srcTa = null, srcPrev = null;
+  ed.root.append(gridPane, srcPane);
+
+  const tools = el('div', 'gtools');
+  const mkBtn = (label, title, fn) => {
     const btn = el('button', 'edbtn', label);
+    btn.title = title;
     btn.onclick = fn;
     return btn;
   };
-  gtools.append(
-    mkBtn('+ Row below', () => {
-      grid.splice(sel.r + 1, 0, new Array(grid[0].length).fill('')); draw();
-    }),
-    mkBtn('+ Col right', () => {
-      grid.forEach(r => r.splice(sel.c + 1, 0, '')); draw();
-    }),
-    mkBtn('− Row', () => {
-      if (grid.length <= 1) return;
-      grid.splice(sel.r, 1);
-      sel.r = Math.min(sel.r, grid.length - 1);
-      draw();
-    }),
-    mkBtn('− Col', () => {
-      if (grid[0].length <= 1) return;
-      grid.forEach(r => r.splice(sel.c, 1));
-      sel.c = Math.min(sel.c, grid[0].length - 1);
-      draw();
-    }),
+  const headerBtn = mkBtn('▤ Header rules', 'Apply the canonical booktabs pattern: toprule above the first row, midrule below it, bottomrule at the end', toggleHeader);
+  tools.append(
+    headerBtn,
+    mkBtn('+ Row', 'Insert a row at the selection', () => ops.addRow(sel.r)),
+    mkBtn('+ Col', 'Insert a column at the selection', () => ops.addCol(sel.c)),
+    mkBtn('− Row', 'Delete the selected row', () => ops.delRow(sel.r)),
+    mkBtn('− Col', 'Delete the selected column', () => ops.delCol(sel.c)),
   );
-  bar.append(gtools);
+  if (model.advanced) {
+    const adv = el('span', 'gadv', 'advanced constructs preserved');
+    adv.title = 'This table contains \\multicolumn/\\multirow/\\cline/\\cmidrule. ' +
+      'Cell text and layout are preserved; structural edits act best-effort.';
+    tools.append(adv);
+  }
+  tools.append(el('span', 'hint',
+    'Tab/Enter/arrows navigate · Shift+Enter newline · Ctrl+Enter saves'));
+  gridPane.append(tools);
 
+  // caption / label row
+  const capRow = el('div', 'gcap');
+  const capIn = el('input');
+  capIn.placeholder = 'Caption';
+  const capPos = el('select');
+  [['below', 'below'], ['above', 'above']].forEach(([v, l]) => {
+    const o = el('option', '', l);
+    o.value = v;
+    capPos.append(o);
+  });
+  const lblIn = el('input');
+  lblIn.placeholder = 'label';
+  capRow.append(el('span', 'gcaplbl', 'Caption'), capIn, capPos,
+    el('span', 'gcaplbl', 'Label'), lblIn);
+  if (model.caption) { capIn.value = model.caption.text; capPos.value = model.caption.pos; }
+  if (model.label) lblIn.value = model.label;
+  if (!model.wrap) {
+    capIn.disabled = lblIn.disabled = capPos.disabled = true;
+    capIn.title = 'captions need a table environment wrapper';
+  } else {
+    capIn.addEventListener('input', () => {
+      if (!capIn.value.trim()) { model.caption = null; updatePreview(); return; }
+      if (!model.caption) model.caption = {text: '', short: null, pos: capPos.value};
+      model.caption.text = capIn.value;
+      updatePreview();
+    });
+    capPos.addEventListener('change', () => {
+      if (model.caption) { model.caption.pos = capPos.value; updatePreview(); }
+    });
+    lblIn.addEventListener('input', () => {
+      model.label = lblIn.value.trim() || null;
+      updatePreview();
+    });
+  }
+  gridPane.append(capRow);
+
+  // colspec / width row
+  const specRow = el('div', 'gcols');
+  const specIn = el('input');
+  specIn.value = model.colspec;
+  specIn.placeholder = 'l c r X p{3cm} …';
+  specRow.append(el('span', 'gcaplbl', 'Columns'), specIn);
+  if (model.widthArg !== null) {
+    const wIn = el('input');
+    wIn.value = model.widthArg;
+    wIn.placeholder = '\\linewidth';
+    specRow.append(el('span', 'gcaplbl', 'Width'), wIn);
+    wIn.addEventListener('input', () => { model.widthArg = wIn.value; updatePreview(); });
+  }
+  specIn.addEventListener('input', () => { model.colspec = specIn.value; updatePreview(); });
+  gridPane.append(specRow);
+
+  // ---- the grid ------------------------------------------------------
   const tbl = el('table', 'gedit');
-  ed.root.append(tbl);
-  const inputs = [];
+  gridPane.append(tbl);
+  let cellInputs = [];
 
-  function draw() {
+  const gutterBtn = (label, title, fn) => {
+    const btn = el('button', 'tgbtn', label);
+    btn.title = title;
+    btn.tabIndex = -1;
+    btn.onclick = e => { e.preventDefault(); e.stopPropagation(); fn(); };
+    return btn;
+  };
+
+  const caretAtEdge = (ta, which) => {
+    if (which === 'left') return ta.selectionStart === 0 && ta.selectionEnd === 0;
+    if (which === 'right') return ta.selectionStart === ta.value.length
+      && ta.selectionEnd === ta.value.length;
+    if (which === 'up') return ta.value.slice(0, ta.selectionStart).indexOf('\n') < 0;
+    return ta.value.slice(ta.selectionEnd).indexOf('\n') < 0; // down
+  };
+  const focusCell = (r, c, caretEnd = true) => {
+    const row = model.rows[r];
+    if (!row) return;
+    // programmatic focus does not reliably fire the focus listener in
+    // every embedded browser — set the selection authoritatively here
+    sel = {r, c: Math.min(c, Math.max(0, logicalCols(row) - 1))};
+    const {i} = cellIndexForCol(row, Math.min(c, logicalCols(row) - 1));
+    const ta = cellInputs.find(x => x._r === r && x._i === i);
+    if (!ta) return;
+    ta.focus();
+    if (caretEnd) ta.setSelectionRange(ta.value.length, ta.value.length);
+    highlightSel(r, c);
+  };
+  const highlightSel = (r, c) => {
+    tbl.querySelectorAll('.selcol,.selrow').forEach(x =>
+      x.classList.remove('selcol', 'selrow'));
+    const tr = tbl.querySelector(`tr[data-r="${r}"]`);
+    if (tr) tr.classList.add('selrow');
+    const row = model.rows[r];
+    if (!row) return;
+    const {i} = cellIndexForCol(row, Math.min(c, logicalCols(row) - 1));
+    const td = tr && tr.querySelector(`td[data-i="${i}"]`);
+    if (td) td.classList.add('selcol');
+  };
+
+  const moveSel = (dc, dr) => {
+    const maxC = ncols() - 1;
+    let {r, c} = sel;
+    if (dc) {
+      c += dc;
+      if (c < 0) { c = maxC; r = Math.max(0, r - 1); }
+      else if (c > maxC) { c = 0; r = Math.min(model.rows.length - 1, r + 1); }
+    }
+    if (dr) r = Math.max(0, Math.min(model.rows.length - 1, r + dr));
+    sel = {r, c};
+    focusCell(r, c);
+  };
+
+  const ruleGapTr = bIdx => {
+    const tr = el('tr', 'rulegap');
+    const td = el('td');
+    td.colSpan = ncols() + 1;
+    const rules = rulesAt(bIdx);
+    if (rules.length) {
+      rules.forEach(rl => {
+        const chip = el('span', 'rulechip',
+          '\\' + rl.kind + (rl.arg && rl.arg.trim() ? '…' : ''));
+        chip.title = 'Click to change, ✕ removes — ' + rl.kind + rl.arg;
+        chip.onclick = () => {
+          rl.kind = cycleKind(bIdx, rl.kind);
+          rl.arg = '';
+          redraw();
+        };
+        const x = el('button', 'tgbtn', '✕');
+        x.title = 'Remove this rule';
+        x.tabIndex = -1;
+        x.onclick = e => {
+          e.preventDefault();
+          model.rules.splice(model.rules.indexOf(rl), 1);
+          redraw();
+        };
+        chip.append(x);
+        td.append(chip);
+      });
+    } else {
+      const add = el('span', 'ruleadd', '+ rule');
+      add.title = 'Insert ' + defaultKind(bIdx);
+      add.onclick = () => {
+        model.rules.push({before: bIdx, kind: defaultKind(bIdx), arg: ''});
+        redraw();
+      };
+      td.append(add);
+    }
+    tr.append(td);
+    return tr;
+  };
+
+  function redraw() {
     tbl.innerHTML = '';
-    inputs.length = 0;
-    grid.forEach((row, r) => {
+    cellInputs = [];
+    const maxC = ncols();
+
+    // column gutter (header row)
+    const head = el('tr');
+    head.append(el('td', 'gcorner'));
+    for (let c = 0; c < maxC; c++) {
+      const td = el('td', 'gcol');
+      td.append(el('span', 'gcollabel', String.fromCharCode(65 + c % 26)));
+      const btns = el('span', 'tgbtns');
+      btns.append(
+        gutterBtn('＋', 'Insert column left', () => ops.addCol(c)),
+        gutterBtn('✕', 'Delete column', () => ops.delCol(c)),
+        gutterBtn('←', 'Move column left', () => ops.moveCol(c, -1)),
+        gutterBtn('→', 'Move column right', () => ops.moveCol(c, 1)),
+      );
+      td.append(btns);
+      head.append(td);
+    }
+    tbl.append(head, ruleGapTr(0));
+
+    model.rows.forEach((row, r) => {
       const tr = el('tr');
-      if (r === sel.r) tr.classList.add('selrow');
-      row.forEach((cell, c) => {
+      tr.dataset.r = r;
+      const g = el('td', 'grow');
+      g.append(el('span', 'gcollabel', String(r + 1)));
+      const btns = el('span', 'tgbtns');
+      btns.append(
+        gutterBtn('＋', 'Insert row above', () => ops.addRow(r)),
+        gutterBtn('✕', 'Delete row', () => ops.delRow(r)),
+        gutterBtn('↑', 'Move row up', () => ops.moveRow(r, -1)),
+        gutterBtn('↓', 'Move row down', () => ops.moveRow(r, 1)),
+      );
+      g.append(btns);
+      tr.append(g);
+      row.cells.forEach((cell, i) => {
         const td = el('td');
-        if (r === sel.r && c === sel.c) td.classList.add('selcol');
+        td.dataset.i = i;
+        if (cell.mc && cell.mc.n > 1) td.colSpan = cell.mc.n;
         const ta = el('textarea');
-        ta.value = cell;
+        ta.value = cell.text;
         ta.rows = 1;
+        ta._r = r; ta._i = i;
         ta.addEventListener('focus', () => {
-          sel = {r, c};
-          tbl.querySelectorAll('.selcol,.selrow')
-            .forEach(x => x.classList.remove('selcol', 'selrow'));
-          td.classList.add('selcol');
-          tr.classList.add('selrow');
+          sel = {r, c: logicalColOf(row, i)};
+          highlightSel(r, sel.c);
         });
-        ta.addEventListener('input', () => { grid[r][c] = ta.value; });
+        ta.addEventListener('input', () => {
+          cell.text = ta.value;
+          ta.style.height = 'auto';
+          ta.style.height = ta.scrollHeight + 'px';
+          updatePreview();
+        });
         ta.addEventListener('keydown', e => {
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); }
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault(); commit(); return;
+          }
+          if (e.key === 'Tab') { e.preventDefault(); moveSel(e.shiftKey ? -1 : 1, 0); return; }
+          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); moveSel(0, 1); return; }
+          if (e.key === 'ArrowUp' && caretAtEdge(ta, 'up')) { e.preventDefault(); moveSel(0, -1); return; }
+          if (e.key === 'ArrowDown' && caretAtEdge(ta, 'down')) { e.preventDefault(); moveSel(0, 1); return; }
+          if (e.key === 'ArrowLeft' && caretAtEdge(ta, 'left')) { e.preventDefault(); moveSel(-1, 0); return; }
+          if (e.key === 'ArrowRight' && caretAtEdge(ta, 'right')) { e.preventDefault(); moveSel(1, 0); }
         });
-        inputs.push(ta);
+        cellInputs.push(ta);
         td.append(ta);
         tr.append(td);
       });
-      tbl.append(tr);
+      // pad short rows visually so the grid stays rectangular
+      for (let p = logicalCols(row); p < maxC; p++) tr.append(el('td', 'gpad'));
+      tbl.append(tr, ruleGapTr(r + 1));
     });
-    if (inputs[0]) inputs[0].focus();
-  }
-  draw();
 
-  ed.getValue = () => {
-    const body = grid.map(r => r.map(c => c.trim()).join(' & ')).join(' \\\\\n');
-    return `\\begin{${parsed.env}}{${parsed.colspec}}\n${body}\n\\end{${parsed.env}}`;
+    headerBtn.classList.toggle('toggled', headerOn());
+    updatePreview();
+    focusCell(sel.r, sel.c);
+  }
+
+  const logicalColOf = (row, i) => {
+    let pos = 0;
+    const spans = rowSpans(row);
+    for (let k = 0; k < i; k++) pos += spans[k];
+    return pos;
   };
-  ed.focus = () => inputs[0] && inputs[0].focus();
+
+  // ---- live preview ---------------------------------------------------
+  const preview = el('div', 'edpreview');
+  gridPane.append(preview);
+  let prevTimer = null;
+  function updatePreview() {
+    clearTimeout(prevTimer);
+    prevTimer = setTimeout(() => {
+      const src = serializeTableRich(model);
+      const L = parseTabularLenient(src);
+      if (L) {
+        preview.innerHTML = '<div class="tabwrap">' +
+          renderTableHTML(L.grid) +
+          (L.caption ? `<figcaption class="figcap">${renderInline(L.caption)}</figcaption>` : '') +
+          '</div>';
+      } else {
+        preview.innerHTML = '<pre class="kerr">' + esc(src) + '</pre>';
+      }
+    }, 120);
+  }
+
+  // ---- source pane (escape hatch) --------------------------------------
+  const srcBtn = el('button', 'edbtn', 'LaTeX source');
+  srcBtn.title = 'Edit the raw LaTeX of this table';
+  bar.insertBefore(srcBtn, bar.firstChild);
+  const buildSrcPane = () => {
+    srcPane.innerHTML = '';
+    srcTa = el('textarea');
+    srcTa.spellcheck = false;
+    srcTa.value = serializeTableRich(model);
+    attachAutocomplete(srcTa);
+    srcPrev = el('div', 'edpreview');
+    const upd = () => {
+      const L = parseTabularLenient(srcTa.value);
+      srcPrev.innerHTML = L
+        ? '<div class="tabwrap">' + renderTableHTML(L.grid) +
+          (L.caption ? `<figcaption class="figcap">${renderInline(L.caption)}</figcaption>` : '') + '</div>'
+        : '';
+    };
+    srcTa.addEventListener('input', upd);
+    srcTa.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); }
+    });
+    upd();
+    srcPane.append(srcTa, srcPrev);
+  };
+  srcBtn.onclick = () => {
+    if (pane === 'grid') {
+      buildSrcPane();
+      pane = 'src';
+      gridPane.classList.add('hidden');
+      srcPane.classList.remove('hidden');
+      srcBtn.textContent = 'Visual editor';
+      srcTa.focus();
+    } else {
+      const m2 = parseTableRich(srcTa.value);
+      if (!m2) {
+        toast('Cannot return to the visual editor — the LaTeX no longer fits', true);
+        return;
+      }
+      Object.assign(model, m2);
+      pane = 'grid';
+      srcPane.classList.add('hidden');
+      gridPane.classList.remove('hidden');
+      srcBtn.textContent = 'LaTeX source';
+      sel = {r: 0, c: 0};
+      redraw();
+    }
+  };
+
+  redraw();
+
+  ed.getValue = () => pane === 'grid' ? serializeTableRich(model) : srcTa.value;
+  ed.focus = () => (pane === 'grid' ? focusCell(sel.r, sel.c) : srcTa && srcTa.focus());
   return ed;
 }
 
