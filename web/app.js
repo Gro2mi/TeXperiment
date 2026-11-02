@@ -2084,6 +2084,32 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
     if (bIdx === model.rows.length) return kind === 'bottomrule' ? 'hline' : 'bottomrule';
     return kind === 'midrule' ? 'hline' : 'midrule';
   };
+  const setRule = (bIdx, kind) => {
+    model.rules = model.rules.filter(r => r.before !== bIdx);
+    if (kind) model.rules.push({before: bIdx, kind, arg: ''});
+  };
+  // cycle the boundary below row r: none -> mid/bottomrule -> hline -> none
+  const cycleRuleBelow = r => {
+    const bIdx = r + 1;
+    const cur = rulesAt(bIdx)[0];
+    if (!cur) setRule(bIdx, defaultKind(bIdx));
+    else if (cur.kind === 'midrule' || cur.kind === 'bottomrule') setRule(bIdx, 'hline');
+    else setRule(bIdx, null);
+    redraw();
+  };
+  // cycle the top rule (boundary above the first row)
+  const cycleRuleTop = () => {
+    const cur = rulesAt(0)[0];
+    if (!cur) setRule(0, 'toprule');
+    else if (cur.kind === 'toprule') setRule(0, 'hline');
+    else setRule(0, null);
+    redraw();
+  };
+  const ruleBelowLabel = r => {
+    const cur = rulesAt(r + 1)[0];
+    return cur ? cur.kind : 'none';
+  };
+
   const headerOn = () =>
     rulesAt(0).some(r => r.kind === 'toprule') &&
     rulesAt(1).some(r => r.kind === 'midrule') &&
@@ -2245,53 +2271,38 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
     focusCell(r, c);
   };
 
-  const ruleGapTr = bIdx => {
-    const tr = el('tr', 'rulegap');
-    const td = el('td');
-    td.colSpan = ncols() + 1;
-    const rules = rulesAt(bIdx);
-    if (rules.length) {
-      rules.forEach(rl => {
-        const chip = el('span', 'rulechip',
-          '\\' + rl.kind + (rl.arg && rl.arg.trim() ? '…' : ''));
-        chip.title = 'Click to change, ✕ removes — ' + rl.kind + rl.arg;
-        chip.onclick = () => {
-          rl.kind = cycleKind(bIdx, rl.kind);
-          rl.arg = '';
-          redraw();
-        };
-        const x = el('button', 'tgbtn', '✕');
-        x.title = 'Remove this rule';
-        x.tabIndex = -1;
-        x.onclick = e => {
-          e.preventDefault();
-          model.rules.splice(model.rules.indexOf(rl), 1);
-          redraw();
-        };
-        chip.append(x);
-        td.append(chip);
-      });
-    } else {
-      const add = el('span', 'ruleadd', '+ rule');
-      add.title = 'Insert ' + defaultKind(bIdx);
-      add.onclick = () => {
-        model.rules.push({before: bIdx, kind: defaultKind(bIdx), arg: ''});
-        redraw();
-      };
-      td.append(add);
-    }
-    tr.append(td);
-    return tr;
-  };
 
   function redraw() {
     tbl.innerHTML = '';
     cellInputs = [];
     const maxC = ncols();
 
+    // content-based column widths (ch hints; the browser shrinks to fit)
+    const colgroup = el('colgroup');
+    const gcolW = el('col');
+    gcolW.style.width = '112px';
+    colgroup.append(gcolW);
+    for (let c = 0; c < maxC; c++) {
+      let maxLen = 4;
+      for (const row of model.rows) {
+        const {i} = cellIndexForCol(row, Math.min(c, logicalCols(row) - 1));
+        const cell = row.cells[i];
+        if (cell) maxLen = Math.max(maxLen, cell.text.length);
+      }
+      const col = el('col');
+      col.style.width = Math.min(46, maxLen + 2) + 'ch';
+      colgroup.append(col);
+    }
+
     // column gutter (header row)
     const head = el('tr');
-    head.append(el('td', 'gcorner'));
+    const corner = el('td', 'gcorner');
+    const topRule = rulesAt(0)[0];
+    const topBtn = gutterBtn('▬', 'Top rule: ' + (topRule ? topRule.kind : 'none') +
+      ' (click cycles toprule / hline / none)', cycleRuleTop);
+    if (topRule) topBtn.classList.add('onrule');
+    corner.append(topBtn);
+    head.append(corner);
     for (let c = 0; c < maxC; c++) {
       const td = el('td', 'gcol');
       td.append(el('span', 'gcollabel', String.fromCharCode(65 + c % 26)));
@@ -2305,7 +2316,7 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
       td.append(btns);
       head.append(td);
     }
-    tbl.append(head, ruleGapTr(0));
+    tbl.append(colgroup, head);
 
     model.rows.forEach((row, r) => {
       const tr = el('tr');
@@ -2313,9 +2324,13 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
       const g = el('td', 'grow');
       g.append(el('span', 'gcollabel', String(r + 1)));
       const btns = el('span', 'tgbtns');
+      const ruleBtn = gutterBtn('▬', 'Rule below this row: ' + ruleBelowLabel(r) +
+        ' (click cycles rule / hline / none)', () => cycleRuleBelow(r));
+      if (rulesAt(r + 1).length) ruleBtn.classList.add('onrule');
       btns.append(
         gutterBtn('＋', 'Insert row above', () => ops.addRow(r)),
         gutterBtn('✕', 'Delete row', () => ops.delRow(r)),
+        ruleBtn,
         gutterBtn('↑', 'Move row up', () => ops.moveRow(r, -1)),
         gutterBtn('↓', 'Move row down', () => ops.moveRow(r, 1)),
       );
@@ -2356,9 +2371,15 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
       });
       // pad short rows visually so the grid stays rectangular
       for (let p = logicalCols(row); p < maxC; p++) tr.append(el('td', 'gpad'));
-      tbl.append(tr, ruleGapTr(r + 1));
+      tbl.append(tr);
     });
 
+    // measure after layout: the editor root attaches right after
+    // buildEditor returns, so scrollHeight is 0 during the first draw
+    requestAnimationFrame(() => cellInputs.forEach(t => {
+      t.style.height = 'auto';
+      t.style.height = t.scrollHeight + 'px';
+    }));
     headerBtn.classList.toggle('toggled', headerOn());
     updatePreview();
     focusCell(sel.r, sel.c);

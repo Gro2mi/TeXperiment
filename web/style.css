@@ -25,6 +25,9 @@
   --flash-bg: #6b2a2a;    /* proof word flash */
   --git-change-bg: #22392c;
   --disk-change-bg: #3b3520;
+  --sel-bg: #2b3d57;
+  --toggled-bg: #2e4059;
+  --toggled-border: #4a6a96;
   --git-add-bg: #2a4d33;
   --git-del-bg: #4d2a2a;
   --git-del-ink: #e8a0a0;
@@ -44,6 +47,9 @@ html[data-theme='light'] {
   --flash-bg: #f6c9c9;
   --git-change-bg: #f0faf1;
   --disk-change-bg: #fff8e1;
+  --sel-bg: #eef4ff;
+  --toggled-bg: #e5edff;
+  --toggled-border: #b9cbf5;
   --git-add-bg: #d1ecd7;
   --git-del-bg: #fadada;
   --git-del-ink: #8a3a3a;
@@ -213,7 +219,7 @@ table.rtab td, table.rtab th { border: 1px solid #999; padding: 4px 12px; font-s
 }
 .edbtn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .edbtn:hover { filter: brightness(.96); }
-.edbtn.toggled { background: #e5edff; border-color: #b9cbf5; }
+.edbtn.toggled { background: var(--toggled-bg); border-color: var(--toggled-border); }
 .editor textarea, .rawwrap textarea {
   width: 100%; font-family: var(--mono); font-size: 13.5px; line-height: 1.5;
   border: 1px solid var(--panel-line); border-radius: 4px; padding: 8px;
@@ -227,10 +233,13 @@ math-field { display: block; width: 100%; min-height: 54px; padding: 6px; border
 .gedit { border-collapse: collapse; margin: 4px 0 8px; }
 .gedit td { border: 1px solid var(--panel-line); padding: 0; }
 .gedit textarea {
-  border: none; min-height: 34px; padding: 5px 8px; font-size: 13px; min-width: 110px;
-  background: transparent; resize: none;
+  border: none; min-height: 30px; padding: 5px 8px; font-size: 13px;
+  width: 100%; min-width: 0; display: block;
+  background: transparent; resize: none; color: var(--panel-ink);
+  overflow: hidden;
 }
-.gedit td.selcol, .gedit tr.selrow { background: #eef4ff; }
+table.gedit { width: 100%; table-layout: auto; }
+.gedit td.selcol, .gedit tr.selrow { background: var(--sel-bg); }
 .gtools { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
 .gtools .edbtn { font-size: 12px; padding: 2px 9px; }
 
@@ -522,12 +531,15 @@ table.gedit td.gcorner { min-width: 10px; }
   font-size: 10.5px; color: var(--muted); font-family: var(--mono);
 }
 .tgbtns { display: none; white-space: nowrap; }
-table.gedit td.gcol:hover .tgbtns, table.gedit td.grow:hover .tgbtns { display: inline; }
+table.gedit tr:hover .tgbtns, table.gedit tr.selrow .tgbtns,
+table.gedit td.gcol:hover .tgbtns { display: inline; }
 .tgbtn {
   border: none; background: none; cursor: pointer; color: var(--muted);
-  font-size: 10px; padding: 0 2px; border-radius: 3px;
+  font-size: 14px; padding: 1px 4px; border-radius: 4px; line-height: 1;
 }
 .tgbtn:hover { background: var(--hover-bg); color: var(--accent); }
+.tgbtn.onrule { color: var(--accent); }
+table.gedit td.gcol, table.gedit td.grow { min-width: 108px; }
 table.gedit td.gpad { background:
   repeating-linear-gradient(45deg, transparent, transparent 6px,
   var(--soft-bg) 6px, var(--soft-bg) 7px); }
