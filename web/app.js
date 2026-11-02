@@ -274,6 +274,28 @@ function renderInline(src, marks, git) {
   let i = 0;
   const n = src.length;
   while (i < n) {
+    // new text first: a green add-run at this position renders before
+    // the crossed-out old text that follows it
+        // wrap runs inside a git add-range in green
+        if (adds.length) {
+          while (ai < adds.length && i >= adds[ai].e) ai++;
+          const ga = adds[ai];
+          if (ga && i >= ga.s && i < ga.e) {
+            let run = '';
+            while (i < n && i < ga.e) {
+              const ch = src[i];
+              if (ch === '\\' || ch === '$' || ch === '%') break;
+              run += (ch === '\n' || ch === '~') ? ' ' : ch;
+              i++;
+            }
+            if (run) {
+              out += `<span class="git-add">${esc(run)}</span>`;
+              continue;
+            }
+            // run starts on a command/math char - fall through so the
+            // normal branches advance past it (never loop without progress)
+          }
+        }
     flushDels();
     const c = src[i];
     if (c === '\\') {
@@ -422,21 +444,6 @@ function renderInline(src, marks, git) {
             i++;
           }
           out += `<span class="pf-err">${esc(run)}</span>`;
-          continue;
-        }
-      }
-      // wrap runs inside a git add-range in green
-      if (adds.length) {
-        while (ai < adds.length && i >= adds[ai].e) ai++;
-        const ga = adds[ai];
-        if (ga && i >= ga.s && i < ga.e) {
-          let run = '';
-          while (i < n && i < ga.e && src[i] !== '\\' && src[i] !== '$' &&
-                 src[i] !== '%') {
-            run += (src[i] === '\n' || src[i] === '~') ? ' ' : src[i];
-            i++;
-          }
-          out += `<span class="git-add">${esc(run)}</span>`;
           continue;
         }
       }

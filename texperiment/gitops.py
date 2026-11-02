@@ -206,7 +206,12 @@ MAX_OPS = 200  # beyond this a block falls back to "all new"
 
 
 def _word_diff(old, new):
-    """Word-level diff → (adds, dels) in *current source* coordinates.
+    r"""Phrase-level diff → (adds, dels) in *current source* coordinates.
+
+    Word-level SequenceMatcher, but adjacent changes that are separated by
+    nothing but whitespace are grouped into one region: the new phrasing
+    becomes a single green range and the old phrasing a single red
+    placeholder, instead of word-by-word interleaving.
 
     adds: [{s, e}] char ranges in `new`; dels: [{s, text}] insertion points
     in `new` + removed old text. Whitespace-only changes are skipped.
@@ -215,36 +220,39 @@ def _word_diff(old, new):
     a = tok.split(old)
     b = tok.split(new)
     sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
-    adds, dels = [], []
-    pos_b = 0          # chars of `new` consumed so far
-    offsets_b = []
+    offsets = []
+    pos = 0
     for t in b:
-        offsets_b.append(pos_b)
-        pos_b += len(t)
-    offsets_b.append(pos_b)
-    pending_del = []
+        offsets.append(pos)
+        pos += len(t)
+    offsets.append(pos)
 
-    def flush_del(at):
-        if pending_del:
-            text = ''.join(pending_del)
-            # skip whitespace-only deletions
-            if text.strip():
-                dels.append({'s': at, 'text': text})
-            pending_del.clear()
-
+    # collect change regions: consecutive change opcodes separated only by
+    # whitespace-only equal runs are merged into one region
+    regions = []  # {b_start, b_end, old: [fragments]}
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == 'equal':
-            flush_del(offsets_b[j1])
-        elif tag == 'delete':
-            pending_del.append(''.join(a[i1:i2]))
-        elif tag == 'insert':
-            flush_del(offsets_b[j1])
-            adds.append({'s': offsets_b[j1], 'e': offsets_b[j2]})
-        elif tag == 'replace':
-            flush_del(offsets_b[j1])
-            adds.append({'s': offsets_b[j1], 'e': offsets_b[j2]})
-            pending_del.append(''.join(a[i1:i2]))
-    flush_del(len(new))
+            continue
+        b_s, b_e = offsets[j1], offsets[j2]
+        a_text = ''.join(a[i1:i2])
+        if regions:
+            gap = new[regions[-1]['b_end']:b_s]
+            if not gap.strip():  # only whitespace since the last change
+                regions[-1]['old'].append(gap)
+                regions[-1]['old'].append(a_text)
+                regions[-1]['b_end'] = b_e
+                continue
+        regions.append({'b_start': b_s, 'b_end': b_e, 'old': [a_text]})
+
+    adds, dels = [], []
+    for r in regions:
+        old_text = ''.join(r['old'])
+        if not old_text.strip() and new[r['b_start']:r['b_end']].strip() == '':
+            continue  # whitespace-only reshuffle
+        if r['b_end'] > r['b_start']:
+            adds.append({'s': r['b_start'], 'e': r['b_end']})
+        if old_text.strip():
+            dels.append({'s': r['b_start'], 'text': old_text})
     return adds, dels
 
 
