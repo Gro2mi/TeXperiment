@@ -194,6 +194,9 @@ def mask_prose(text):
     while i < n:
         if kept[i]:
             c = out[i]
+            if c == '\r':
+                i += 1
+                continue  # CRLF pair: the \n that follows marks the break
             if c in ' \n' and last in (' ', '\n', ''):
                 i += 1
                 continue  # collapse doubled whitespace / blank lines
