@@ -2996,9 +2996,9 @@ function gitFileGroup(title, paths, kind) {
   } else if (kind === 'unstaged') {
     hbtn('⧉', 'View the combined diff of all changed files',
       () => openGitDiffAll(false));
-    hbtn('＋', 'Stage all changed files', () => gitPaths('stage', paths.slice()));
     hbtn('↩', 'Discard ALL changes (asks for confirmation)',
       () => gitDiscard(paths.slice()));
+    hbtn('＋', 'Stage all changed files', () => gitPaths('stage', paths.slice()));
   }
   head.append(hbtns);
   wrap.append(head);
