@@ -450,6 +450,7 @@ function renderInline(src, marks, git) {
       out += esc(c); i++;
     }
   }
+    flushDels(); // trailing deletions after an add that reached the end
   return out;
 }
 
