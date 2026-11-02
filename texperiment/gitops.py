@@ -312,8 +312,13 @@ def block_diffs(store):
             continue  # untracked file: /git/changes already marks all-new
         cur_blocks = [b for b in store.doc['blocks'] if b['file'] == rel]
         old_blocks = parse_file(head, is_main=(rel == store.doc['main']))
-        a = [_norm_src(head[s:e]) for _t, s, e, _m in old_blocks]
-        b = [_norm_src(x['source']) for x in cur_blocks]
+        # normalized sources align the blocks across line-ending drift;
+        # the word diff itself runs on the RAW sources so the issue
+        # offsets are raw-source coordinates for the frontend render
+        a_raw = [head[s:e] for _t, s, e, _m in old_blocks]
+        b_raw = [x['source'] for x in cur_blocks]
+        a = [_norm_src(x2) for x2 in a_raw]
+        b = [_norm_src(x2) for x2 in b_raw]
         sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
         for tag, i1, i2, j1, j2 in sm.get_opcodes():
             if tag == 'equal':
@@ -322,12 +327,12 @@ def block_diffs(store):
                 # pair up as far as possible; leftovers handled below
                 pairs = min(i2 - i1, j2 - j1)
                 for k in range(pairs):
-                    adds, dels = _word_diff(a[i1 + k], b[j1 + k])
+                    adds, dels = _word_diff(a_raw[i1 + k], b_raw[j1 + k])
                     if not adds and not dels:
                         continue  # identical modulo trailing newline
                     if len(adds) + len(dels) > MAX_OPS:
                         diffs[cur_blocks[j1 + k]['id']] = {
-                            'kind': 'new', 'adds': [{'s': 0, 'e': len(b[j1 + k])}],
+                            'kind': 'new', 'adds': [{'s': 0, 'e': len(b_raw[j1 + k])}],
                             'dels': []}
                     else:
                         diffs[cur_blocks[j1 + k]['id']] = {
@@ -341,12 +346,12 @@ def block_diffs(store):
                         'text': a[i1 + k]})
                 for k in range(pairs, j2 - j1):  # new blocks without partner
                     diffs[cur_blocks[j1 + pairs + k]['id']] = {
-                        'kind': 'new', 'adds': [{'s': 0, 'e': len(b[j1 + pairs + k])}],
+                        'kind': 'new', 'adds': [{'s': 0, 'e': len(b_raw[j1 + pairs + k])}],
                         'dels': []}
             elif tag == 'insert':
                 for k in range(j1, j2):
                     diffs[cur_blocks[k]['id']] = {
-                        'kind': 'new', 'adds': [{'s': 0, 'e': len(b[k])}], 'dels': []}
+                        'kind': 'new', 'adds': [{'s': 0, 'e': len(b_raw[k])}], 'dels': []}
             elif tag == 'delete':
                 for k in range(i1, i2):
                     gid += 1

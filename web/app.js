@@ -372,7 +372,7 @@ function renderInline(src, marks, git) {
   const flushDels = () => {
     while (di < dels.length && dels[di].s <= i) {
       const d = dels[di++];
-      const full = d.text.replace(/\\s+/g, ' ').trim();
+      const full = d.text.replace(/\s+/g, ' ').trim();
       const shown = full.length > 60 ? full.slice(0, 60) + '…' : full;
       out += `<span class="git-del" data-full="${esc(full).replace(/"/g, '&quot;')}">${esc(shown)}</span>`;
     }
