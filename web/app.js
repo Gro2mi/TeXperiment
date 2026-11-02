@@ -1862,9 +1862,12 @@ function switchProject(pid) {
   // proof issues are document-specific
   state.proof.issues = [];
   state.proof.checked = false;
-  loadProofConfig();
-  refreshBib();
-  refreshDoc();
+  refreshDoc().then(() => {
+    // auto-check only once the new document is in state — otherwise
+    // results would be mapped onto the previous project's blocks
+    if (state.project === pid) loadProofConfig();
+    if (state.project === pid) refreshBib();
+  });
 }
 
 async function removeProject(pid) {
@@ -2559,12 +2562,16 @@ function rerenderContentPreservingScroll() {
 
 async function checkDocument() {
   if (!state.project || state.proof.checking) return;
+  const pid = state.project;
+  const doc = state.doc; // map onto the doc the check was started with
+  if (!doc) return;
   state.proof.checking = true;
   renderProof();
   try {
     const res = await ppost('/proof/check', {lang: proofLang()});
+    if (state.project !== pid) return; // switched projects mid-check
     // snapshot the flagged text so staleness can be detected later
-    const byId = new Map(state.doc.blocks.map(b => [b.id, b]));
+    const byId = new Map(doc.blocks.map(b => [b.id, b]));
     for (const i of res.issues) {
       const b = byId.get(i.block_id);
       i.text = b ? b.source.slice(i.start, i.end) : '';
@@ -2583,10 +2590,14 @@ async function checkDocument() {
 // re-check only the given blocks (after an edit) and merge into the results
 async function checkBlocks(ids) {
   if (!state.project || !ids || !ids.length) return;
+  const pid = state.project;
+  const doc = state.doc;
+  if (!doc) return;
   try {
     const res = await ppost('/proof/check',
       {lang: proofLang(), block_ids: ids});
-    const byId = new Map(state.doc.blocks.map(b => [b.id, b]));
+    if (state.project !== pid) return; // switched projects mid-check
+    const byId = new Map(doc.blocks.map(b => [b.id, b]));
     for (const i of res.issues) {
       const b = byId.get(i.block_id);
       i.text = b ? b.source.slice(i.start, i.end) : '';
