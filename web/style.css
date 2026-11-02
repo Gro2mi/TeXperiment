@@ -390,10 +390,8 @@ body.drag-active .grip { pointer-events: none; }
 
 /* ---------- git: changed blocks + outline markers ---------- */
 .block.git-change {
-  background: var(--git-change-bg);
   box-shadow: inset 3px 0 0 0 #4caf6d;
 }
-.block.git-change:hover { background: var(--git-change-bg); }
 
 /* inline word-level diff inside changed blocks */
 .git-add {

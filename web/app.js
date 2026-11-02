@@ -2864,44 +2864,8 @@ function showCitePopup(span) {
   pfPopup = pop;
 }
 
-function showGitDelPopup(span) {
-  const full = span.dataset.full || span.title || span.textContent;
-  hideProofPopup();
-  const pop = el('div', 'pfpopup gtdelpop');
-  const head = el('div', 'pfpopuphead');
-  head.append(el('span', 'pfbadge pf-typo', 'removed'));
-  head.append(el('span', 'spacer'));
-  const x = el('button', 'gbtn', '✕');
-  x.title = 'Close';
-  x.onclick = hideProofPopup;
-  head.append(x);
-  pop.append(head);
-  pop.append(el('div', 'pfpopupmsg', 'This text was removed since the last commit:'));
-  pop.append(el('div', 'citetext', esc(full)));
-  document.body.append(pop);
-  const r = span.getBoundingClientRect();
-  const pw = pop.offsetWidth, ph = pop.offsetHeight;
-  let left = r.left + window.scrollX;
-  let top = r.bottom + window.scrollY + 4;
-  if (left + pw > window.scrollX + document.documentElement.clientWidth - 8) {
-    left = window.scrollX + document.documentElement.clientWidth - pw - 8;
-  }
-  if (top + ph > window.scrollY + window.innerHeight && r.top - ph > 0) {
-    top = r.top + window.scrollY - ph - 4;
-  }
-  pop.style.left = left + 'px';
-  pop.style.top = top + 'px';
-  pfPopup = pop;
-}
-
 function initProofHover() {
   document.addEventListener('mouseover', ev => {
-    const gdel = ev.target.closest && ev.target.closest('.git-del');
-    if (gdel) {
-      clearTimeout(pfHideTimer);
-      showGitDelPopup(gdel);
-      return;
-    }
     const cite = ev.target.closest && ev.target.closest('.citeref');
     if (cite) {
       clearTimeout(pfHideTimer);
