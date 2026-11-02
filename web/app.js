@@ -1628,7 +1628,7 @@ function closeEditor() {
   }
 }
 
-function openEditor(b) {
+function openEditor(b, freshOpts) {
   if (state.edit) {
     if (state.edit.id === b.id) return;
     closeEditor();
@@ -1638,10 +1638,11 @@ function openEditor(b) {
 
   const kind = b.type === 'math' ? 'math'
     : (b.type === 'table' && parseTableRich(b.source) ? 'grid' : 'source');
-  const ed = buildEditor(b, kind);
+  const ed = buildEditor(b, kind, freshOpts);
   node.classList.add('editing');
   node.querySelector('.bcontent').replaceWith(ed.root);
-  state.edit = {id: b.id, kind, original: b.source, root: ed, block: b};
+  state.edit = {id: b.id, kind, original: b.source, root: ed, block: b,
+    fresh: !!(freshOpts && freshOpts.fresh), ph: freshOpts && freshOpts.ph};
   // Esc always closes the open editor, whatever has focus — unless an
   // autocomplete popup is open, then Esc closes just the popup
   state._escHandler = ev => {
@@ -1945,7 +1946,7 @@ function attachAutocomplete(ta) {
   ta.addEventListener('blur', () => setTimeout(close, 150));
 }
 
-function buildEditor(b, kind) {
+function buildEditor(b, kind, freshOpts) {
   const ed = {root: el('div', 'editor'), kind};
   const bar = el('div', 'edbar');
   const commitBtn = el('button', 'edbtn primary', '✓ Save');
@@ -1977,6 +1978,12 @@ function buildEditor(b, kind) {
     bar.append(el('span', 'hint', 'Ctrl+Enter saves · Esc cancels'));
     const ta = el('textarea');
     ta.value = b.source;
+    if (freshOpts && freshOpts.fresh) {
+      // freshly inserted: show the on-disk skeleton as a greyed hint,
+      // not as pre-selected text; saving empty keeps the skeleton
+      ta.value = '';
+      ta.placeholder = (freshOpts.ph || 'LaTeX for this block…') + '\n' + b.source;
+    }
     ta.rows = Math.min(Math.max(b.source.split('\n').length + 1, 3), 24);
     ta.spellcheck = false;
     attachAutocomplete(ta); // cite keys + \ref/\label targets
@@ -1989,7 +1996,8 @@ function buildEditor(b, kind) {
     ta.addEventListener('keydown', e => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); }
     });
-    ed.getValue = () => ta.value;
+    ed.getValue = () => ((freshOpts && freshOpts.fresh && !ta.value.trim())
+      ? b.source : ta.value);
     ed.focus = () => ta.focus();
     return ed;
   }
@@ -2586,13 +2594,13 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
 /* ------------------------------------------------------------------ */
 
 const TEMPLATES = [
-  ['Raw LaTeX', '% raw LaTeX — replace me'],
+  ['Raw LaTeX', '% raw LaTeX - replace me'],
   ['Paragraph', 'New paragraph text. Edit me.'],
-  ['Display equation', '\\[\ne^{i\\pi} = -1\n\\]'],
-  ['Itemized list', '\\begin{itemize}\n\\item First point\n\\item Second point\n\\end{itemize}'],
+  ['Display equation', '\\[e^{i\\pi = -1\\]'],
+  ['Itemized list', '\\begin{itemize}\n  \\item First point\n  \\item Second point\n\\end{itemize}'],
   ['Table', '\\begin{tabular}{ll}\nAlpha & Beta \\\\\nGamma & Delta\n\\end{tabular}'],
   ['Section', '\\section{New section}'],
-  ['Figure', '\\begin{figure}\n\\centering\n\\includegraphics{figures/plot.png}\n\\caption{A caption.}\n\\end{figure}'],
+  ['Figure', '\\begin{figure}\n  \\centering\n  \\includegraphics{figures/plot.png}\n  \\caption{A caption.}\n\\end{figure}'],
 ];
 
 function showInsertMenu(b, ev) {
@@ -2611,15 +2619,9 @@ function showInsertMenu(b, ev) {
           if (nb) {
             scrollToBlock(nb.id);
             setTimeout(() => {
-              openEditor(nb);
-              // fresh source editors: hint text pre-selected, so the first
-              // keystroke replaces it instead of appending
-              const ta = document.querySelector('.block.editing textarea');
-              if (ta && ta.offsetParent) {
-                ta.placeholder = 'Write your ' + label.toLowerCase() + ' here…';
-                ta.focus();
-                ta.select();
-              }
+              scrollToBlock(nb.id);
+              openEditor(nb, {fresh: true,
+                ph: 'Write your ' + label.toLowerCase() + ' here…'});
             }, 60);
           }
         }
@@ -3930,10 +3932,22 @@ function applyDoc(doc, fromDisk = false) {
   if (keep) {
     state.edit.id = keep.id;
     state.edit.block = keep;
+    // moving the editor DOM loses focus and the text selection - capture
+    // and restore them around the re-attach (watcher live reloads)
+    let fsel = null;
+    const prevActive = document.activeElement;
+    if (prevActive && state.edit.root.root.contains(prevActive) &&
+        typeof prevActive.selectionStart === 'number') {
+      fsel = {el: prevActive, s: prevActive.selectionStart, e: prevActive.selectionEnd};
+    }
     const node = $(`.block[data-id="${keep.id}"]`);
     if (node) {
       node.classList.add('editing');
       node.querySelector('.bcontent').replaceWith(state.edit.root.root);
+    }
+    if (fsel) {
+      fsel.el.focus();
+      fsel.el.setSelectionRange(fsel.s, fsel.e);
     }
   } else if (state.edit) {
     banner('The document changed on disk. Your open edit could not be matched ' +
