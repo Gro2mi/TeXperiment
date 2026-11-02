@@ -3078,12 +3078,16 @@ function renderGit() {
   const bar = el('div', 'gitbar');
   const commitBtn = el('button', 'edbtn primary', '✓ Commit');
   const pushBtn = el('button', 'edbtn', '⇅ Push');
-  if (!g.has_remote) {
+  if (state.pushing) {
+    pushBtn.disabled = true;
+    pushBtn.innerHTML = '<span class="spin"></span> Pushing…';
+    pushBtn.title = 'Push in progress';
+  } else if (!g.has_remote) {
     pushBtn.disabled = true;
     pushBtn.title = 'No remote configured — add one with:\ngit remote add origin <url>';
   }
   commitBtn.onclick = () => gitCommit(ta);
-  pushBtn.onclick = gitPush;
+  pushBtn.onclick = e => gitPush(e.currentTarget);
   bar.append(commitBtn, pushBtn);
   panel.append(ta, bar);
   ta.addEventListener('keydown', e => {
@@ -3194,7 +3198,16 @@ async function gitCommit(ta) {
   } catch (e) { toast('Commit failed: ' + e.message, true); }
 }
 
-async function gitPush() {
+async function gitPush(btn) {
+  if (!state.project || state.pushing) return;
+  state.pushing = true;
+  // busy state on the clicked button; the periodic renderGit rebuilds
+  // keep it via state.pushing
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin"></span> Pushing…';
+    btn.title = 'Push in progress';
+  }
   try {
     const res = await ppost('/git/push', {});
     state.git = res.status;
@@ -3206,6 +3219,9 @@ async function gitPush() {
       msg += ` — run: git push -u origin ${state.git.branch}`;
     }
     toast(msg, true);
+  } finally {
+    state.pushing = false;
+    renderGit(); // restores the enabled button
   }
 }
 
