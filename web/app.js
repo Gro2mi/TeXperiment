@@ -25,6 +25,7 @@ const state = {
   },
   history: {can_undo: false, can_redo: false}, // server-side undo/redo flags
   bib: null,         // parsed .bbl: {style, entries} — null = not loaded
+  gitDiff: {diffs: {}, ghosts: []}, // word-level diffs vs git HEAD
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -182,6 +183,27 @@ function proofMarksFor(b) {
 
 // shift marks from block-source coordinates into a sub-string that starts
 // at srcOffset and has length len (used for titles, list items, captions)
+// shift git diff annotations into a sub-string starting at srcOffset
+function shiftGit(git, srcOffset, len) {
+  if (!git) return null;
+  const adds = git.adds
+    .filter(m => m.e > srcOffset && m.s < srcOffset + len)
+    .map(m => ({s: Math.max(0, m.s - srcOffset), e: Math.min(len, m.e - srcOffset)}));
+  const dels = git.dels
+    .filter(d => d.s >= srcOffset && d.s < srcOffset + len)
+    .map(d => ({s: d.s - srcOffset, text: d.text}));
+  return (adds.length || dels.length) ? {adds, dels} : null;
+}
+
+// word-level diff annotations for a block (null = no inline detail)
+function gitMarksFor(b) {
+  if (!state.gitHl || !state.gitDiff || !state.gitDiff.diffs) return null;
+  const d = state.gitDiff.diffs[b.id];
+  if (!d) return null;
+  if (d.kind === 'new') return {adds: [{s: 0, e: b.source.length}], dels: []};
+  return d;
+}
+
 function shiftMarks(marks, srcOffset, len) {
   if (!marks || !marks.length) return [];
   return marks
@@ -233,13 +255,26 @@ function renderCitation(cmd, opts, keys) {
   return wrap(html);
 }
 
-function renderInline(src, marks) {
+function renderInline(src, marks, git) {
+  marks = marks || [];
+  const adds = git && git.adds ? git.adds : [];
+  const dels = git && git.dels ? git.dels : [];
+  let di = 0, ai = 0;
+  const flushDels = () => {
+    while (di < dels.length && dels[di].s <= i) {
+      const d = dels[di++];
+      const full = d.text.replace(/\\s+/g, ' ').trim();
+      const shown = full.length > 60 ? full.slice(0, 60) + '…' : full;
+      out += `<span class="git-del" data-full="${esc(full).replace(/"/g, '&quot;')}">${esc(shown)}</span>`;
+    }
+  };
   marks = marks || [];
   let mi = 0;
   let out = '';
   let i = 0;
   const n = src.length;
   while (i < n) {
+    flushDels();
     const c = src[i];
     if (c === '\\') {
       const m = /^\\([a-zA-Z]+)\*?/.exec(src.slice(i));
@@ -281,19 +316,19 @@ function renderInline(src, marks) {
         const g = readGroup(src, after);
         if (g) {
           if (cmd === 'footnote') {
-            out += `<sup class="fn" title="footnote">${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</sup>`;
+            out += `<sup class="fn" title="footnote">${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</sup>`;
           } else if (['ref', 'eqref', 'cite', 'label'].includes(cmd)) {
             out += `<span class="chip">${cmd}:${esc(g.body)}</span>`;
           } else if (cmd === 'url') {
             out += `<code>${esc(g.body)}</code>`;
           } else if (cmd === 'textbf') {
-            out += `<strong>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</strong>`;
+            out += `<strong>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</strong>`;
           } else if (cmd === 'texttt') {
             out += `<code>${esc(g.body)}</code>`;
           } else if (cmd === 'underline') {
-            out += `<u>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</u>`;
+            out += `<u>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</u>`;
           } else { // textit, emph, text, textrm, mbox
-            out += `<em>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</em>`;
+            out += `<em>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</em>`;
           }
           i = g.end;
           continue;
@@ -312,7 +347,7 @@ function renderInline(src, marks) {
         // \paragraph{Title.} → bold run-in heading followed by the text
         const g = readGroup(src, after);
         if (g) {
-          out += `<strong>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length))}</strong> `;
+          out += `<strong>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</strong> `;
           i = g.end;
           continue;
         }
@@ -387,6 +422,21 @@ function renderInline(src, marks) {
             i++;
           }
           out += `<span class="pf-err">${esc(run)}</span>`;
+          continue;
+        }
+      }
+      // wrap runs inside a git add-range in green
+      if (adds.length) {
+        while (ai < adds.length && i >= adds[ai].e) ai++;
+        const ga = adds[ai];
+        if (ga && i >= ga.s && i < ga.e) {
+          let run = '';
+          while (i < n && i < ga.e && src[i] !== '\\' && src[i] !== '$' &&
+                 src[i] !== '%') {
+            run += (src[i] === '\n' || src[i] === '~') ? ' ' : src[i];
+            i++;
+          }
+          out += `<span class="git-add">${esc(run)}</span>`;
           continue;
         }
       }
@@ -543,7 +593,7 @@ function parseTabularLenient(src) {
   return {grid, caption, labels: mathLabels(src)};
 }
 
-function renderTableHTML(grid, marks, src) {
+function renderTableHTML(grid, marks, src, git) {
   // locate each cell's text sequentially in the block source so proof
   // squiggles (and the flash) work inside table cells too
   let cm = null;
@@ -555,13 +605,15 @@ function renderTableHTML(grid, marks, src) {
       let off = t ? src.indexOf(t, cursor) : -1;
       if (off < 0) off = t ? src.indexOf(t) : -1;
       if (off >= 0) cursor = off + t.length;
-      per.push(off >= 0 ? shiftMarks(marks, off, t.length) : []);
+      per.push([off >= 0 ? shiftMarks(marks, off, t.length) : [],
+            off >= 0 ? shiftGit(git, off, t.length) : null]);
     }
     cm = per;
   }
   let k = 0;
   const rows = grid.map(r =>
-    `<tr>${r.map(c => `<td>${renderInline(c, cm ? cm[k++] : [])}</td>`).join('')}</tr>`).join('');
+    `<tr>${r.map(c => { const pair = cm ? cm[k++] : [null, null];
+      return `<td>${renderInline(c, pair[0], pair[1])}</td>`; }).join('')}</tr>`).join('');
   return `<table class="rtab">${rows}</table>`;
 }
 
@@ -617,6 +669,18 @@ function isBlankComment(b) {
 /* block content renderers                                             */
 /* ------------------------------------------------------------------ */
 
+// a removed-since-HEAD block rendered as a red ghost placeholder row
+function ghostEl(g) {
+  const node = el('div', 'block git-ghost');
+  node.dataset.ghost = g.gid;
+  node.append(el('span', 'ghostbadge', 'removed'));
+  const content = el('div', 'bcontent ghostcontent');
+  const full = g.text.replace(/\\s+/g, ' ').trim();
+  content.innerHTML = `<span class="git-del" data-full="${esc(full).replace(/"/g, '&quot;')}">${esc(full.length > 400 ? full.slice(0, 400) + '…' : full)}</span>`;
+  node.append(content);
+  return node;
+}
+
 function blockById(id) {
   return state.doc.blocks.find(b => b.id === id) || null;
 }
@@ -644,10 +708,11 @@ function renderBlockContent(b) {
       const title = (b.meta && b.meta.title) || '';
       // marks live in block-source coordinates; the title starts after '{'
       const titleMarks = shiftMarks(proofMarksFor(b), b.source.indexOf('{') + 1, title.length);
-      return `<h${lv} class="blk">${chev}${num ? num + ' ' : ''}${renderInline(title, titleMarks)}</h${lv}>`;
+      const titleGit = shiftGit(gitMarksFor(b), b.source.indexOf('{') + 1, title.length);
+      return `<h${lv} class="blk">${chev}${num ? num + ' ' : ''}${renderInline(title, titleMarks, titleGit)}</h${lv}>`;
     }
     case 'paragraph':
-      return `<div class="rtext">${renderInline(b.source, proofMarksFor(b))}</div>`;
+      return `<div class="rtext">${renderInline(b.source, proofMarksFor(b), gitMarksFor(b))}</div>`;
     case 'math': {
       const labels = mathLabels(b.source);
       return `<div class="disp-math">${katexSpan(displayTex(b), true)}` +
@@ -662,21 +727,22 @@ function renderBlockContent(b) {
         let off = b.source.indexOf(it, cursor);
         if (off < 0) off = b.source.indexOf(it);
         if (off >= 0) cursor = off + it.length;
-        return `<li>${renderInline(it, off >= 0 ? shiftMarks(marks, off, it.length) : [])}</li>`;
+        const gm = off >= 0 ? shiftGit(gitMarksFor(b), off, it.length) : null; return `<li>${renderInline(it, off >= 0 ? shiftMarks(marks, off, it.length) : [], gm)}</li>`;
       });
       const tag = isOrd ? 'ol' : 'ul';
       return `<${tag} class="rtext">${items.join('')}</${tag}>`;
     }
     case 'table': {
       const t = parseTabular(b.source);
-      if (t) return renderTableHTML(t.grid, proofMarksFor(b), b.source);
+      if (t) return renderTableHTML(t.grid, proofMarksFor(b), b.source, gitMarksFor(b));
       const L = parseTabularLenient(b.source);
       if (L) {
         const cOff = L.caption ? b.source.indexOf(L.caption) : -1;
         const cMarks = cOff >= 0 ? shiftMarks(proofMarksFor(b), cOff, L.caption.length) : [];
+        const cGit = cOff >= 0 ? shiftGit(gitMarksFor(b), cOff, L.caption.length) : null;
         return `<div class="tabwrap">` +
-          renderTableHTML(L.grid, proofMarksFor(b), b.source) +
-          (L.caption ? `<figcaption class="figcap">${renderInline(L.caption, cMarks)}</figcaption>` : '') +
+          renderTableHTML(L.grid, proofMarksFor(b), b.source, gitMarksFor(b)) +
+          (L.caption ? `<figcaption class="figcap">${renderInline(L.caption, cMarks, cGit)}</figcaption>` : '') +
           (L.labels.length ? `<div class="mathlabels">${labelChips(L.labels)}</div>` : '') +
           `<div class="editnote">preview — edit as source for exact layout</div></div>`;
       }
@@ -689,8 +755,9 @@ function renderBlockContent(b) {
         `data-orig="${esc(path)}" alt="figure">`;
       const cOff = caption ? b.source.indexOf(caption) : -1;
       const cMarks = cOff >= 0 ? shiftMarks(proofMarksFor(b), cOff, caption.length) : [];
+      const cGit = cOff >= 0 ? shiftGit(gitMarksFor(b), cOff, caption.length) : null;
       return `<figure class="blkfig">${img}` +
-        (caption ? `<figcaption class="figcap">${renderInline(caption, cMarks)}</figcaption>` : '') +
+        (caption ? `<figcaption class="figcap">${renderInline(caption, cMarks, cGit)}</figcaption>` : '') +
         `</figure>`;
     }
     default:
@@ -910,6 +977,19 @@ function renderContent() {
   }
   const hiddenIds = computeCollapsedIds(blocks);
   const docEl = el('div', 'doc');
+  // git ghost rows: blocks removed since HEAD (only with highlighting on)
+  const ghosts = (state.gitHl && state.git && state.git.repo
+    && state.gitDiff && state.gitDiff.ghosts) ? state.gitDiff.ghosts : [];
+  const pending = ghosts.slice();
+  const flushGhosts = (beforeId) => {
+    const out = [];
+    for (let g = pending.length - 1; g >= 0; g--) {
+      if (pending[g].before_id === beforeId) {
+        out.unshift(ghostEl(pending.splice(g, 1)[0]));
+      }
+    }
+    return out;
+  };
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i];
     const h = hiddenIds.has(b.id);
@@ -924,6 +1004,8 @@ function renderContent() {
       if (!headingLabel) docEl.append(insertLine(b, h || nextH));
     }
   }
+  for (const ge of (flushGhosts(null) || [])) docEl.append(ge);
+  if (pending.length) pending.forEach(g => docEl.append(ghostEl(g))); // anchors hidden
   c.append(docEl);
 }
 
@@ -1859,6 +1941,7 @@ function switchProject(pid) {
   state.git = null;
   state.gitChanged = new Set();
   state.gitShowDiff = false;
+  state.gitDiff = {diffs: {}, ghosts: []};
   // proof issues are document-specific
   state.proof.issues = [];
   state.proof.checked = false;
@@ -2103,6 +2186,8 @@ async function fetchGitChanges() {
     const ch = await papi('/git/changes');
     state.gitChanged = new Set(ch.ids);
   } catch (e) { /* status panel still works; highlighting stays as-is */ }
+  try { state.gitDiff = await papi('/git/blockdiffs'); }
+  catch (e) { state.gitDiff = {diffs: {}, ghosts: []}; }
 }
 
 async function refreshGit() {
@@ -2114,15 +2199,25 @@ async function refreshGit() {
   }
   try {
     state.git = await papi('/git/status');
-    if (state.git.repo) await fetchGitChanges();
-    else state.gitChanged = new Set();
+    if (state.git.repo) {
+      await fetchGitChanges();
+    } else {
+      state.gitChanged = new Set();
+      state.gitDiff = {diffs: {}, ghosts: []};
+    }
   } catch (e) {
     return; // git hiccups shouldn't nag on every save
   }
   renderGit();
   applyGitHighlights();
   applyOutlineGitMarks();
-  if (state.gitShowDiff) renderContent(); // keep the diff filter current
+  // inline diff marks and ghosts live in the rendered blocks — re-render
+  // when the diff set actually changed (not on every status refresh)
+  const sig = state.gitChanged.size + ':' + Object.keys(state.gitDiff.diffs).join(',');
+  if (sig !== state._gitDiffSig) {
+    state._gitDiffSig = sig;
+    rerenderContentPreservingScroll();
+  }
 }
 
 function toggleGitHl() {
@@ -2769,8 +2864,44 @@ function showCitePopup(span) {
   pfPopup = pop;
 }
 
+function showGitDelPopup(span) {
+  const full = span.dataset.full || span.title || span.textContent;
+  hideProofPopup();
+  const pop = el('div', 'pfpopup gtdelpop');
+  const head = el('div', 'pfpopuphead');
+  head.append(el('span', 'pfbadge pf-typo', 'removed'));
+  head.append(el('span', 'spacer'));
+  const x = el('button', 'gbtn', '✕');
+  x.title = 'Close';
+  x.onclick = hideProofPopup;
+  head.append(x);
+  pop.append(head);
+  pop.append(el('div', 'pfpopupmsg', 'This text was removed since the last commit:'));
+  pop.append(el('div', 'citetext', esc(full)));
+  document.body.append(pop);
+  const r = span.getBoundingClientRect();
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+  let left = r.left + window.scrollX;
+  let top = r.bottom + window.scrollY + 4;
+  if (left + pw > window.scrollX + document.documentElement.clientWidth - 8) {
+    left = window.scrollX + document.documentElement.clientWidth - pw - 8;
+  }
+  if (top + ph > window.scrollY + window.innerHeight && r.top - ph > 0) {
+    top = r.top + window.scrollY - ph - 4;
+  }
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
+  pfPopup = pop;
+}
+
 function initProofHover() {
   document.addEventListener('mouseover', ev => {
+    const gdel = ev.target.closest && ev.target.closest('.git-del');
+    if (gdel) {
+      clearTimeout(pfHideTimer);
+      showGitDelPopup(gdel);
+      return;
+    }
     const cite = ev.target.closest && ev.target.closest('.citeref');
     if (cite) {
       clearTimeout(pfHideTimer);

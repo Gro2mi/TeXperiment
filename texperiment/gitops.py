@@ -4,6 +4,8 @@ All commands run with cwd=<project root>, so paths given to git are
 project-root-relative pathspecs and `HEAD:./<rel>` resolves relative to
 the project inside the repo even when the repo toplevel is higher up.
 """
+import difflib
+import re
 import subprocess
 from pathlib import Path
 
@@ -197,3 +199,115 @@ def changed_block_ids(store):
         else:
             out.append(b['id'])
     return out
+
+# ---------------------------------------------------------------- block diffs
+
+MAX_OPS = 200  # beyond this a block falls back to "all new"
+
+
+def _word_diff(old, new):
+    """Word-level diff → (adds, dels) in *current source* coordinates.
+
+    adds: [{s, e}] char ranges in `new`; dels: [{s, text}] insertion points
+    in `new` + removed old text. Whitespace-only changes are skipped.
+    """
+    tok = re.compile(r'(\s+)')
+    a = tok.split(old)
+    b = tok.split(new)
+    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+    adds, dels = [], []
+    pos_b = 0          # chars of `new` consumed so far
+    offsets_b = []
+    for t in b:
+        offsets_b.append(pos_b)
+        pos_b += len(t)
+    offsets_b.append(pos_b)
+    pending_del = []
+
+    def flush_del(at):
+        if pending_del:
+            text = ''.join(pending_del)
+            # skip whitespace-only deletions
+            if text.strip():
+                dels.append({'s': at, 'text': text})
+            pending_del.clear()
+
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == 'equal':
+            flush_del(offsets_b[j1])
+        elif tag == 'delete':
+            pending_del.append(''.join(a[i1:i2]))
+        elif tag == 'insert':
+            flush_del(offsets_b[j1])
+            adds.append({'s': offsets_b[j1], 'e': offsets_b[j2]})
+        elif tag == 'replace':
+            flush_del(offsets_b[j1])
+            adds.append({'s': offsets_b[j1], 'e': offsets_b[j2]})
+            pending_del.append(''.join(a[i1:i2]))
+    flush_del(len(new))
+    return adds, dels
+
+
+def block_diffs(store):
+    """Inline word-level diffs of changed blocks vs HEAD.
+
+    Returns {diffs: {block_id: {kind, adds, dels}}, ghosts: [...]} where
+    ghosts are whole blocks removed since HEAD (before_id = the current
+    block at their old position, None = end of document).
+    """
+    top, _ = find_repo(store.root)
+    if top is None:
+        return {'diffs': {}, 'ghosts': []}
+    diffs, ghosts = {}, []
+    gid = 0
+    for entry in store.doc['files']:
+        rel, enc = entry['path'], entry.get('encoding', 'utf-8')
+        head = _head_text(store.root, rel, enc)
+        if head is None:
+            continue  # untracked file: /git/changes already marks all-new
+        cur_blocks = [b for b in store.doc['blocks'] if b['file'] == rel]
+        old_blocks = parse_file(head, is_main=(rel == store.doc['main']))
+        a = [_norm_src(head[s:e]) for _t, s, e, _m in old_blocks]
+        b = [_norm_src(x['source']) for x in cur_blocks]
+        sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == 'equal':
+                continue
+            if tag == 'replace':
+                # pair up as far as possible; leftovers handled below
+                pairs = min(i2 - i1, j2 - j1)
+                for k in range(pairs):
+                    adds, dels = _word_diff(a[i1 + k], b[j1 + k])
+                    if not adds and not dels:
+                        continue  # identical modulo trailing newline
+                    if len(adds) + len(dels) > MAX_OPS:
+                        diffs[cur_blocks[j1 + k]['id']] = {
+                            'kind': 'new', 'adds': [{'s': 0, 'e': len(b[j1 + k])}],
+                            'dels': []}
+                    else:
+                        diffs[cur_blocks[j1 + k]['id']] = {
+                            'kind': 'modified', 'adds': adds, 'dels': dels}
+                for k in range(pairs, i2 - i1):  # old blocks without partner
+                    gid += 1
+                    ghosts.append({
+                        'gid': f'g{gid}', 'file': rel,
+                        'before_id': (cur_blocks[j1 + pairs]['id']
+                                      if j1 + pairs < len(cur_blocks) else None),
+                        'text': a[i1 + k]})
+                for k in range(pairs, j2 - j1):  # new blocks without partner
+                    diffs[cur_blocks[j1 + pairs + k]['id']] = {
+                        'kind': 'new', 'adds': [{'s': 0, 'e': len(b[j1 + pairs + k])}],
+                        'dels': []}
+            elif tag == 'insert':
+                for k in range(j1, j2):
+                    diffs[cur_blocks[k]['id']] = {
+                        'kind': 'new', 'adds': [{'s': 0, 'e': len(b[k])}], 'dels': []}
+            elif tag == 'delete':
+                for k in range(i1, i2):
+                    gid += 1
+                    ghosts.append({
+                        'gid': f'g{gid}', 'file': rel,
+                        'before_id': (cur_blocks[j1]['id']
+                                      if j1 < len(cur_blocks) else None),
+                        'text': a[k]})
+    return {'diffs': diffs, 'ghosts': ghosts}

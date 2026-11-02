@@ -631,6 +631,10 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         ids = _run(gitops.changed_block_ids, get_project(pid).store)
         return {'ids': ids, 'count': len(ids)}
 
+    @app.get('/api/project/{pid}/git/blockdiffs')
+    def git_blockdiffs_route(pid: str):
+        return _run(gitops.block_diffs, get_project(pid).store)
+
     # -- proofreading -----------------------------------------------------------
     @app.get('/api/project/{pid}/proof/config')
     def proof_config_route(pid: str):
@@ -839,6 +843,15 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         loop = asyncio.get_running_loop()
         for proj in projects.values():
             watch_project(proj)
+
+    # dev-friendly caching: browsers must revalidate the frontend assets
+    # (etag), otherwise code changes need a hard reload to take effect
+    @app.middleware('http')
+    async def no_cache_static(request, call_next):
+        resp = await call_next(request)
+        if request.url.path in ('/', '/index.html', '/app.js', '/style.css'):
+            resp.headers['Cache-Control'] = 'no-cache'
+        return resp
 
     app.mount('/', StaticFiles(directory=str(WEB_DIR), html=True), name='web')
     return app
