@@ -3351,12 +3351,35 @@ async function toggleBlockStage(b) {
   try {
     const res = await ppost(route, {message: b.id});
     dd.staged = res.staged;
-    await fetchGitChanges();
-    renderGit();
-    applyGitHighlights();
-    // re-render so the button itself flips to its staged look at once
-    rerenderContentPreservingScroll();
+    // flip this block's button(s) immediately — the authoritative
+    // re-render follows once blockdiffs answers
+    document.querySelectorAll('button.stage-in-block').forEach(bt => {
+      const blk = bt.closest('.block');
+      if (blk && blk.dataset.id === b.id) {
+        bt.classList.toggle('staged', dd.staged);
+        bt.title = dd.staged ? 'Unstage this block\u2019s change'
+          : 'Stage this block\u2019s change';
+      }
+    });
     toast(dd.staged ? 'Block change staged' : 'Block change unstaged');
+    // refresh everything the click affects, each part as soon as it
+    // arrives: the sidebar groups come from the cheap status call,
+    // highlights/button state from changes + blockdiffs — no waiting
+    // for the periodic refresh
+    papi('/git/status').then(s2 => {
+      state.git = s2; renderGit();
+    }).catch(() => {});
+    papi('/git/changes').then(c2 => {
+      state.gitChanged = new Set(c2.ids);
+    }).catch(() => {});
+    papi('/git/blockdiffs').then(d2 => {
+      state.gitDiff = d2;
+      const stg = d2.staged || {};
+      for (const bid of Object.keys(stg))
+        if (d2.diffs[bid]) d2.diffs[bid].staged = stg[bid];
+      applyGitHighlights();
+      rerenderContentPreservingScroll();
+    }).catch(() => {});
   } catch (e) { toast('Block stage failed: ' + e.message, true); }
 }
 
