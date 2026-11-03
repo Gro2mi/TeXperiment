@@ -17,6 +17,9 @@ const state = {
   gitChanged: new Set(), // block ids whose content differs from git HEAD
   gitHl: localStorage.getItem('git-hl') !== '0',  // highlight changes (persisted)
   gitShowDiff: localStorage.getItem('git-show-diff') === '1', // persisted
+  diskHl: localStorage.getItem('disk-hl') !== '0', // yellow external-change highlights (persisted)
+  diskAcked: false,   // 'acknowledge all' pressed for the current set
+  diskAckedKeys: new Set(), // block keys acknowledged this session
   proof: {           // proofreading state
     config: null,    // /proof/config payload (engine availability)
     issues: [],
@@ -1407,7 +1410,8 @@ function insertLine(b, hidden = false) {
 function blockEl(b, hidden = false) {
   const node = el('div', 'block b-' + b.type + (hidden ? ' b-collapsed' : ''));
   node.dataset.id = b.id;
-  if (state.diskKeys && state.diskKeys.has(blockKey(b))) node.classList.add('disk-change');
+  if (state.diskHl && state.diskKeys &&
+      state.diskKeys.has(blockKey(b))) node.classList.add('disk-change');
   if (state.gitHl && state.gitChanged.has(b.id)) node.classList.add('git-change');
   if (isBlankComment(b)) node.classList.add('b-hidden');
   node.append(el('div', 'bcontent', renderBlockContent(b)));
@@ -3140,6 +3144,33 @@ async function refreshGit() {
   }
 }
 
+function toggleDiskHl() {
+  state.diskHl = !state.diskHl;
+  localStorage.setItem('disk-hl', state.diskHl ? '1' : '0');
+  renderContentPreservingScroll();
+}
+
+function renderContentPreservingScroll() {
+  const content = $('#content');
+  const firstVisible = [...document.querySelectorAll('.block')]
+    .find(n2 => n2.getBoundingClientRect().bottom > 0);
+  const anchorId = firstVisible ? firstVisible.dataset.id : null;
+  const prevOffset = anchorId
+    ? (document.querySelector(`.block[data-id="${anchorId}"]`) || {}).offsetTop : 0;
+  renderContent();
+  if (anchorId) {
+    const n2 = document.querySelector(`.block[data-id="${anchorId}"]`);
+    if (n2) content.scrollTop += n2.offsetTop - prevOffset;
+  }
+}
+
+function acknowledgeDiskChanges() {
+  // clear all yellow highlights and stop re-flagging the current set
+  state.diskKeys = new Set();
+  state.diskAcked = true;
+  renderContentPreservingScroll();
+}
+
 function toggleGitHl() {
   state.gitHl = !state.gitHl;
   localStorage.setItem('git-hl', state.gitHl ? '1' : '0');
@@ -3206,7 +3237,14 @@ function renderGit() {
   hlBtn.onclick = toggleGitHl;
   const diffBtn = el('button', 'gtoggle' + (state.gitShowDiff ? ' on' : ''), 'Only diff');
   diffBtn.onclick = toggleDiffOnly;
-  views.append(hlBtn, diffBtn);
+  const diskBtn = el('button', 'gtoggle' + (state.diskHl ? ' on' : ''), 'External changes');
+  diskBtn.title = 'Yellow highlights for blocks that changed on disk outside the editor';
+  diskBtn.onclick = () => {
+    state.diskHl = !state.diskHl;
+    localStorage.setItem('disk-hl', state.diskHl ? '1' : '0');
+    renderContentPreservingScroll();
+  };
+  views.append(hlBtn, diffBtn, diskBtn);
   panel.append(views);
 
   if (g.staged.length) panel.append(gitFileGroup('Staged changes', g.staged, 'staged'));
@@ -3259,6 +3297,7 @@ function gitFileGroup(title, paths, kind) {
   } else if (kind === 'unstaged') {
     hbtn('⧉', 'View the combined diff of all changed files',
       () => openGitDiffAll(false));
+    hbtn('✓', 'Acknowledge all external-change highlights', () => acknowledgeDiskChanges());
     hbtn('↩', 'Discard ALL changes (asks for confirmation)',
       () => gitDiscard(paths.slice()));
     hbtn('＋', 'Stage all changed files', () => gitPaths('stage', paths.slice()));
@@ -4013,7 +4052,17 @@ function updateHighlights(doc, fromDisk) {
   const present = new Set(doc.blocks.map(blockKey));
   let keys = state.diskKeys ? [...state.diskKeys].filter(k => present.has(k)) : [];
   if (fromDisk) keys = keys.concat([...diffKeys(state.doc, doc)]);
+  if (state.diskAcked) {
+    // after acknowledging, keep only blocks that changed again since
+    // (their keys are the ones newly added by this diff)
+    keys = keys.filter(k => !state.diskAckedKeys.has(k));
+  }
   state.diskKeys = new Set(keys);
+  // remember which keys were acknowledged so a re-arrival of the same
+  // content (e.g. a watcher bounce) stays acknowledged
+  if (state.diskAcked) {
+    keys.forEach(k => state.diskAckedKeys.add(k));
+  }
 }
 
 // ---- reading position (per project, survives reloads) ----------------
