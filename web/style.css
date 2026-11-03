@@ -212,7 +212,7 @@ table.rtab td, table.rtab th { border: 1px solid #999; padding: 4px 12px; font-s
 
 /* per-block stage button (index surgery for exactly this block) */
 .stage-in-block {
-  position: absolute; top: -17px; left: 4px; display: none;
+  position: absolute; top: -10px; left: -46px; display: none;
   border: 1px solid var(--panel-line); background: var(--panel);
   border-radius: 6px; padding: 3px 12px; cursor: pointer;
   font-size: 14px; color: var(--panel-ink); z-index: 5;
