@@ -636,6 +636,34 @@ tr.rulegap td:hover .ruleadd { display: inline; }
 }
 .citelink:hover { background: #2e343d; color: #fff; }
 
+/* ---------- floating format toolbar (B/I/U/color) ---------- */
+.fmtbar {
+  position: absolute; z-index: 85; display: flex; align-items: center; gap: 2px;
+  background: var(--panel); border: 1px solid var(--panel-line); border-radius: 7px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.35); padding: 3px;
+}
+.fmtbtn {
+  min-width: 26px; height: 24px; border: none; background: none; cursor: pointer;
+  border-radius: 4px; font-size: 13px; color: var(--panel-ink);
+  display: flex; align-items: center; justify-content: center; padding: 0 4px;
+}
+.fmtbtn:hover { background: var(--hover-bg); color: var(--accent); }
+.fmb { font-weight: 700; }
+.fmi { font-style: italic; font-family: var(--serif); }
+.fmu { text-decoration: underline; }
+.fmtcolor { font-weight: 600; color: #e05a4e; }
+.fmtcolor::after { content: '▾'; margin-left: 2px; font-size: 9px; }
+.fmtpal {
+  position: absolute; top: -12px; left: 50%; transform: translate(-50%, -100%);
+  display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--panel-line);
+  border-radius: 7px; padding: 5px; box-shadow: 0 4px 16px rgba(0,0,0,.35);
+}
+.fmtsw {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1px solid rgba(255,255,255,.3); cursor: pointer; padding: 0;
+}
+.fmtsw:hover { transform: scale(1.15); }
+
 /* autocomplete popup (cite keys, \ref targets) */
 .acpopup {
   position: absolute; z-index: 90; min-width: 260px; max-width: 520px;

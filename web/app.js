@@ -443,6 +443,21 @@ function renderInline(src, marks, git) {
           continue;
         }
       }
+      if (cmd === 'textcolor' || cmd === 'color') {
+        const g1 = readGroup(src, after);
+        if (g1) {
+          const col = g1.body.replace(/[^a-zA-Z0-9#!]/g, '');
+          const g2 = readGroup(src, g1.end);
+          if (g2) {
+            const inner = renderInline(g2.body,
+              shiftMarks(marks, g2.bodyStart, g2.body.length),
+              shiftGit(git, g2.bodyStart, g2.body.length));
+            out += `<span style="color:${esc(col)}">${inner}</span>`;
+            i = g2.end;
+            continue;
+          }
+        }
+      }
       if (INLINE_ARG_CMDS.includes(cmd)) {
         const g = readGroup(src, after);
         if (g) {
@@ -1769,6 +1784,117 @@ function acContext(ta) {
   return null;
 }
 
+/* ---- Word-style floating format toolbar for source editors ----------
+   selection in a textarea shows a small popup: B / I / U / color.
+   Actions wrap the selection in \textbf{..} \textit{..} \underline{..}
+   \textcolor{col}{..}; clicking an active wrapper removes it. -------- */
+
+const FMT_ACTIONS = [
+  {label: 'B', title: 'Bold (\\textbf)', cls: 'fmb', pre: '\\textbf{', post: '}'},
+  {label: 'I', title: 'Italic (\\textit)', cls: 'fmi', pre: '\\textit{', post: '}'},
+  {label: 'U', title: 'Underline (\\underline)', cls: 'fmu',
+   pre: '\\underline{', post: '}'},
+];
+const FMT_COLORS = ['red', 'blue', 'green', 'orange', 'purple', 'teal',
+  'brown', 'gray'];
+
+function attachFormatToolbar(ta) {
+  let bar = null;
+
+  const hide = () => { if (bar) { bar.remove(); bar = null; } };
+
+  const position = () => {
+    if (ta.selectionStart === ta.selectionEnd) { hide(); return; }
+    if (!bar) return;
+    const cs = getComputedStyle(ta);
+    const div = document.createElement('div');
+    for (const p of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight',
+      'padding', 'border', 'letterSpacing', 'boxSizing', 'tabSize',
+      'whiteSpace', 'wordWrap', 'width']) div.style[p] = cs[p];
+    div.style.position = 'absolute';
+    div.style.visibility = 'hidden';
+    document.body.append(div);
+    div.textContent = ta.value.slice(0, ta.selectionStart);
+    const marker = document.createElement('span');
+    marker.textContent = '\u200b';
+    div.append(marker);
+    const taRect = ta.getBoundingClientRect();
+    const mr = marker.getBoundingClientRect();
+    const dr = div.getBoundingClientRect();
+    div.remove();
+    let left = taRect.left + (mr.left - dr.left) + window.scrollX;
+    let top = taRect.top + (mr.top - dr.top) + window.scrollY - 44;
+    if (top < window.scrollY + 8) top = taRect.bottom + window.scrollY + 8;
+    left = Math.max(8, Math.min(left,
+      window.scrollX + document.documentElement.clientWidth - 220));
+    bar.style.left = left + 'px';
+    bar.style.top = top + 'px';
+  };
+
+  const apply = (pre, post, unwrapRe) => {
+    const s = ta.selectionStart, e = ta.selectionEnd;
+    if (s === e) return;
+    const before = ta.value.slice(0, s);
+    const sel = ta.value.slice(s, e);
+    const after = ta.value.slice(e);
+    if (unwrapRe && unwrapRe.test(before) && after.startsWith(post)) {
+      // selection already wrapped — remove the wrapper
+      ta.value = before.replace(unwrapRe, '') + sel + after.slice(post.length);
+      ta.setSelectionRange(s - pre.length, e - post.length);
+    } else {
+      ta.value = before + pre + sel + post + after;
+      ta.setSelectionRange(s + pre.length, s + pre.length + sel.length);
+    }
+    ta.dispatchEvent(new Event('input', {bubbles: true}));
+    position();
+  };
+
+  const buildBar = () => {
+    bar = el('div', 'fmtbar');
+    bar.addEventListener('mousedown', e => e.preventDefault()); // keep selection
+    for (const a of FMT_ACTIONS) {
+      const btn = el('button', 'fmtbtn ' + a.cls, a.label);
+      btn.title = a.title;
+      btn.onclick = () => apply(a.pre, a.post,
+        new RegExp(a.pre.replace(/([{}])/g, '\\$1') + '$'));
+      bar.append(btn);
+    }
+    const cbtn = el('button', 'fmtbtn fmtcolor', 'A');
+    cbtn.title = 'Text color (\\textcolor{color}{…})';
+    const pal = el('div', 'fmtpal hidden');
+    for (const col of FMT_COLORS) {
+      const sw = el('button', 'fmtsw');
+      sw.style.background = col;
+      sw.title = col;
+      sw.onclick = () => {
+        apply('\\textcolor{' + col + '}{', '}',
+          new RegExp('\\\\textcolor\\{' + col + '\\}\\{$'));
+        pal.classList.add('hidden');
+      };
+      pal.append(sw);
+    }
+    cbtn.onclick = () => pal.classList.toggle('hidden');
+    bar.append(cbtn);
+    bar.append(pal);
+    return bar;
+  };
+
+  const maybeShow = () => {
+    if (ta.selectionStart !== ta.selectionEnd) {
+      if (!bar) { buildBar(); document.body.append(bar); }
+      position();
+    } else {
+      hide();
+    }
+  };
+
+  ta.addEventListener('mouseup', maybeShow);
+  ta.addEventListener('keyup', maybeShow);
+  ta.addEventListener('input', maybeShow);
+  ta.addEventListener('blur', () => setTimeout(hide, 150));
+  document.addEventListener('scroll', hide, true);
+}
+
 // suggestion items for the current context, filtered by the typed text
 function acSuggestions(kind, typed) {
   const t = typed.toLowerCase();
@@ -1987,6 +2113,8 @@ function buildEditor(b, kind, freshOpts) {
     ta.rows = Math.min(Math.max(b.source.split('\n').length + 1, 3), 24);
     ta.spellcheck = false;
     attachAutocomplete(ta); // cite keys + \ref/\label targets
+  attachFormatToolbar(ta); // word-style B/I/U/color popup
+    attachFormatToolbar(ta); // word-style B/I/U/color popup
     ed.root.append(ta);
     const prev = el('div', 'edpreview');
     const upd = () => { prev.innerHTML = renderBlockContent({...b, source: ta.value}); };
@@ -2543,6 +2671,7 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
     srcTa.spellcheck = false;
     srcTa.value = serializeTableRich(model);
     attachAutocomplete(srcTa);
+    attachFormatToolbar(srcTa); // word-style B/I/U/color popup
     srcPrev = el('div', 'edpreview');
     const upd = () => {
       const L = parseTabularLenient(srcTa.value);
