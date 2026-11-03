@@ -3979,7 +3979,24 @@ function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   state.ws = ws;
-  ws.onopen = () => setConn(true);
+  ws.onopen = () => {
+    setConn(true);
+    // page opened (or stayed open) while the server was down: the socket
+    // reconnects, but nothing ever loaded the projects/content. Pull the
+    // full state once the server answers; also covers server restarts,
+    // where project ids change.
+    fetch('/api/projects').then(r => r.ok ? r.json() : null).then(projects => {
+      if (!Array.isArray(projects)) return;
+      if (!state.doc || !projects.some(p => p.id === state.project)) {
+        state.projects = projects;
+        refreshProjects().then(() => {
+          refreshGit();
+          loadProofConfig();
+          refreshBib();
+        });
+      }
+    }).catch(() => {});
+  };
   ws.onclose = () => {
     setConn(false);
     setTimeout(connectWS, 2000);
