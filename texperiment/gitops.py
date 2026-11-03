@@ -380,3 +380,189 @@ def block_diffs(store):
                                       if j1 < len(cur_blocks) else None),
                         'text': a[k]})
     return {'diffs': diffs, 'ghosts': ghosts}
+
+
+# ---------------------------------------------------------------- block stage
+
+
+def _parse_spans(text, is_main):
+    """(start, end) raw spans of the parsed blocks of text."""
+    return [(s, e) for _t, s, e, _m in parse_file(text, is_main=is_main)]
+
+
+def _norm_spans(text, spans):
+    """Normalized sources for spans (alignment keys)."""
+    return [_norm_src(text[s:e]) for s, e in spans]
+
+
+def _align(base_spans, base_text, cur_sources):
+    """Map cur block index -> (base_start, base_end) raw span in base_text,
+    or None when the block has no base counterpart."""
+    a = _norm_spans(base_text, base_spans)
+    b = [_norm_src(s2) for s2 in cur_sources]
+    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+    m = {}
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        for k in range(min(i2 - i1, j2 - j1)):
+            m[j1 + k] = (base_spans[i1 + k][0], base_spans[i1 + k][1])
+    return m
+
+
+def _file_texts(store, rel):
+    """(head, index, cur) raw texts of a project file (index may be None
+    for untracked files)."""
+    enc = next((e2['encoding'] for e2 in store.doc['files']
+                if e2['path'] == rel), 'utf-8')
+    head = _head_text(store.root, rel, enc)
+    try:
+        idx = _run(store.root, 'show', ':./' + rel, binary=True)
+        if idx.startswith(b'\xef\xbb\xbf'):
+            idx = idx[3:]
+        idx = idx.decode(enc or 'utf-8', errors='replace')
+    except GitError:
+        idx = None
+    cur = (store.root / rel).read_text(encoding=enc or 'utf-8', errors='replace')
+    return head, idx, cur
+
+
+def _staged_flags(store, rel, cur_blocks, idx_text):
+    """Per-block: True when the block's change is already staged (the
+    index copy equals the worktree copy for that block)."""
+    if idx_text is None:
+        return {b['id']: False for b in cur_blocks}
+    idx_spans = _parse_spans(idx_text,
+                          is_main=(rel == store.doc['main']))
+    cur_sources = [b['source'] for b in cur_blocks]
+    m = _align(idx_spans, idx_text, cur_sources)
+    flags = {}
+    for j, b in enumerate(cur_blocks):
+        span = m.get(j)
+        flags[b['id']] = (span is not None and
+            _norm_src(idx_text[span[0]:span[1]]) == _norm_src(b['source']))
+    return flags
+
+
+def _splice_region(text, span, replacement):
+    """Replace the (start, end) span in text with replacement (span may
+    be None = append at end)."""
+    if span is None:
+        return text + replacement
+    s, e = span
+    return text[:s] + replacement + text[e:]
+
+
+def _block_stage_content(store, rel, block_id, target):
+    """File content where ONLY the given block differs from `target`
+    ('index' for staging, 'head' for unstaging). None when the block has
+    no counterpart in the target or nothing would change."""
+    is_main = rel == store.doc['main']
+    head, idx, cur = _file_texts(store, rel)
+    # both targets build on the index: staging splices the current
+    # source in, unstaging splices the HEAD copy of the block in
+    base = idx
+    if base is None:
+        return None
+    base_spans = _parse_spans(base, is_main)
+    cur_blocks = [b for b in store.doc['blocks'] if b['file'] == rel]
+    j = next((k for k, b2 in enumerate(cur_blocks) if b2['id'] == block_id), None)
+    if j is None:
+        return None
+    cur_sources = [b2['source'] for b2 in cur_blocks]
+    m = _align(base_spans, base, cur_sources)
+    span = m.get(j)
+    src_block = cur_sources[j]
+    if target == 'index':
+        # stage this block: index content with our block's current source
+        if span is not None:
+            s, e = span
+            out = base[:s] + src_block + base[e:]
+        else:
+            # new block: insert next to its aligned neighbors
+            pos = None
+            for k in range(j - 1, -1, -1):
+                if k in m:
+                    pos = m[k][1]
+                    break
+            if pos is None:
+                for k in range(j + 1, len(cur_sources)):
+                    if k in m:
+                        pos = m[k][0]
+                        break
+            out = (base[:pos] + src_block + base[pos:]) if pos is not None else None
+        if out is not None and _norm_src(out) == _norm_src(base):
+            return None  # nothing would change
+        return out
+    # unstage this block: index content with our block reverted to HEAD
+    head_spans = _parse_spans(head, is_main)
+    hm = _align(head_spans, head, cur_sources)
+    hspan = hm.get(j)
+    if span is None:
+        return None  # block not in the index either - nothing to unstage
+    s, e = span
+    if hspan is not None:
+        old_src = head[hspan[0]:hspan[1]]
+        return base[:s] + old_src + base[e:]
+    # block is new (not in HEAD): remove it from the index content
+    pos_s = pos_e = None
+    for k in range(j - 1, -1, -1):
+        if k in m:
+            pos_s = m[k][1]
+            break
+    for k in range(j + 1, len(cur_sources)):
+        if k in m:
+            pos_e = m[k][0]
+            break
+    if pos_s is not None:
+        return base[:pos_s] + base[pos_e:]
+    if pos_e is not None:
+        return base[:pos_e]
+    return None
+
+
+def _stage_blob(store, rel, content):
+    """Stage `content` for rel via hash-object + update-index (the
+    worktree is not touched)."""
+    enc = next((e2['encoding'] for e2 in store.doc['files']
+                if e2['path'] == rel), 'utf-8')
+    data = content.encode(enc or 'utf-8')
+    p = subprocess.run(['git', 'hash-object', '-w', '--stdin'], cwd=str(store.root),
+                       input=data, capture_output=True, timeout=20)
+    if p.returncode != 0:
+        raise GitError(p.stderr.decode('utf-8', errors='replace').strip())
+    sha = p.stdout.decode('utf-8').strip()
+    # update-index paths are repo-relative: map the project-relative
+    # path through the repo prefix
+    _top, prefix = find_repo(store.root)
+    rel_repo = prefix + rel if prefix else rel
+    # --add handles paths not yet in the index (file previously
+    # staged-deleted, or first-time staging)
+    _run(store.root, 'update-index', '--add', '--cacheinfo',
+         '100644,' + sha + ',' + rel_repo)
+
+
+def stage_block(store, block_id):
+    """Stage exactly this block's change (index = worktree for this block
+    only; other blocks keep their stage state)."""
+    blk = next((b for b in store.doc['blocks'] if b['id'] == block_id), None)
+    if blk is None:
+        raise ValueError('block not found')
+    rel = blk['file']
+    out = _block_stage_content(store, rel, block_id, 'index')
+    if out is None:
+        return False
+    _stage_blob(store, rel, out)
+    return True
+
+
+def unstage_block(store, block_id):
+    """Revert this block's staged change (index = HEAD for this block
+    only)."""
+    blk = next((b for b in store.doc['blocks'] if b['id'] == block_id), None)
+    if blk is None:
+        raise ValueError('block not found')
+    rel = blk['file']
+    out = _block_stage_content(store, rel, block_id, 'head')
+    if out is None:
+        return False
+    _stage_blob(store, rel, out)
+    return True

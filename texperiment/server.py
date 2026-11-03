@@ -621,6 +621,18 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         text = _run(gitops.diff_all, get_project(pid).store.root, staged)
         return {'text': text}
 
+    @app.post('/api/project/{pid}/git/stage-block')
+    def git_stage_block_route(pid: str, body: GitCommitBody):
+        proj = get_project(pid)
+        staged = _run(gitops.stage_block, proj.store, body.message)
+        return {'ok': True, 'staged': staged}
+
+    @app.post('/api/project/{pid}/git/unstage-block')
+    def git_unstage_block_route(pid: str, body: GitCommitBody):
+        proj = get_project(pid)
+        staged = _run(gitops.unstage_block, proj.store, body.message)
+        return {'ok': True, 'staged': staged}
+
     @app.post('/api/project/{pid}/git/stage')
     def git_stage_route(pid: str, body: GitPathsBody):
         _run(gitops.stage, get_project(pid).store.root, body.paths)
@@ -661,7 +673,18 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
 
     @app.get('/api/project/{pid}/git/blockdiffs')
     def git_blockdiffs_route(pid: str):
-        return _run(gitops.block_diffs, get_project(pid).store)
+        proj = get_project(pid)
+        payload = _run(gitops.block_diffs, proj.store)
+        # per-block staged flags for the toggle buttons
+        staged = {}
+        rels = {e['path'] for e in proj.store.doc['files']}
+        for rel in rels:
+            cur_blocks = [b for b in proj.store.doc['blocks'] if b['file'] == rel]
+            _head, idx, _cur = _run(gitops._file_texts, proj.store, rel)
+            staged.update(_run(gitops._staged_flags, proj.store, rel,
+                               cur_blocks, idx))
+        payload['staged'] = staged
+        return payload
 
     # -- proofreading -----------------------------------------------------------
     @app.get('/api/project/{pid}/proof/config')

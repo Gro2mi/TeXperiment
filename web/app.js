@@ -1421,6 +1421,11 @@ function blockEl(b, hidden = false) {
   if (isBlankComment(b)) node.classList.add('b-hidden');
   node.append(el('div', 'bcontent', renderBlockContent(b)));
   node.append(buildTools(b));
+  const stageBtn = stageBlockButton(b);
+  if (stageBtn) {
+    stageBtn.classList.add('stage-in-block');
+    node.append(stageBtn);
+  }
   // grab handle on the left edge — mousedown starts a pointer-tracked drag
   const grip = el('div', 'grip', '⠿');
   grip.title = 'Drag to move this block';
@@ -3117,6 +3122,11 @@ async function fetchGitChanges() {
   } catch (e) { /* status panel still works; highlighting stays as-is */ }
   try { state.gitDiff = await papi('/git/blockdiffs'); }
   catch (e) { state.gitDiff = {diffs: {}, ghosts: []}; }
+  // per-block staged flags arrive as a top-level map — merge them
+  // into the diff entries the stage/unstage buttons read
+  const stg = state.gitDiff.staged || {};
+  for (const bid of Object.keys(stg))
+    if (state.gitDiff.diffs[bid]) state.gitDiff.diffs[bid].staged = stg[bid];
 }
 
 async function refreshGit() {
@@ -3333,7 +3343,34 @@ function gitFileGroup(title, paths, kind) {
   return wrap;
 }
 
-// stage / unstage are safe ops — refresh straight from the response
+// stage/unstage exactly this block's change (index surgery server-side)
+async function toggleBlockStage(b) {
+  const dd = state.gitDiff && state.gitDiff.diffs[b.id];
+  if (!dd) return;
+  const route = dd.staged ? '/git/unstage-block' : '/git/stage-block';
+  try {
+    const res = await ppost(route, {message: b.id});
+    dd.staged = res.staged;
+    await fetchGitChanges();
+    renderGit();
+    applyGitHighlights();
+    // re-render so the button itself flips to its staged look at once
+    rerenderContentPreservingScroll();
+    toast(dd.staged ? 'Block change staged' : 'Block change unstaged');
+  } catch (e) { toast('Block stage failed: ' + e.message, true); }
+}
+
+// the per-block stage button (only for blocks with a diff)
+function stageBlockButton(b) {
+  const dd = state.gitDiff && state.gitDiff.diffs[b.id];
+  if (!dd || !state.git || !state.git.repo) return null;
+  const btn = el('button', 'btools-btn stage-block' + (dd.staged ? ' staged' : ''), '⇅');
+  btn.title = dd.staged ? 'Unstage this block\u2019s change'
+    : 'Stage this block\u2019s change';
+  btn.onclick = ev => { ev.stopPropagation(); toggleBlockStage(b); };
+  return btn;
+}
+
 async function gitPaths(op, paths) {
   try {
     const res = await ppost(`/git/${op}`, {paths});
