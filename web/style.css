@@ -107,6 +107,11 @@ body {
 #filelist .fitem .fraw { float: right; opacity: .5; font-size: 11px; }
 #filelist .fitem:hover .fraw { opacity: 1; }
 #outline .oitem { padding-left: calc(16px + var(--indent, 0) * 14px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#filelist .fitem.current {
+  background: #2e343d; color: #fff;
+  box-shadow: inset 3px 0 0 0 #7db4ff;
+}
+#filelist .fitem.current .fpath { color: #fff; }
 #outline .oitem.current {
   background: #2e343d; color: #fff;
   box-shadow: inset 3px 0 0 0 #7db4ff;

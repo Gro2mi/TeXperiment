@@ -1211,6 +1211,7 @@ function renderSidebar() {
   if (!state.doc) return;
   for (const f of state.doc.files) {
     const btn = el('button', 'fitem' + (f.path === state.doc.main ? ' main' : ''));
+    btn.dataset.file = f.path;
     btn.innerHTML = `<span class="fpath">${esc(f.path)}</span><span class="fraw">raw ✎</span>`;
     btn.querySelector('.fraw').onclick = ev => {
       ev.stopPropagation();
@@ -1285,6 +1286,15 @@ function updateOutlineCurrent() {
   }
   document.querySelectorAll('#outline .oitem').forEach(it =>
     it.classList.toggle('current', it.dataset.block === currentId));
+  // highlight the raw file the visible content belongs to
+  let currentFile = null;
+  for (const b of state.doc.blocks) {
+    const node = document.querySelector(`.block[data-id="${b.id}"]`);
+    if (!node) continue;
+    if (node.getBoundingClientRect().top <= 140) currentFile = b.file;
+  }
+  document.querySelectorAll('#filelist .fitem').forEach(it =>
+    it.classList.toggle('current', it.dataset.file === currentFile));
 }
 
 function scrollToBlock(id) {
