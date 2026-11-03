@@ -669,6 +669,19 @@ tr.rulegap td:hover .ruleadd { display: inline; }
 }
 .fmtsw:hover { transform: scale(1.15); }
 
+/* ---------- reference chips: hover/click jump to target ---------- */
+.refchip {
+  cursor: pointer;
+  border-bottom: 1px dotted var(--muted);
+  color: var(--accent);
+}
+.refchip:hover { text-decoration: underline; }
+.block.ref-target {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  background: var(--hover-bg);
+}
+
 /* autocomplete popup (cite keys, \ref targets) */
 .acpopup {
   position: absolute; z-index: 90; min-width: 260px; max-width: 520px;

@@ -466,7 +466,12 @@ function renderInline(src, marks, git) {
         if (g) {
           if (cmd === 'footnote') {
             out += `<sup class="fn" title="footnote">${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</sup>`;
-          } else if (['ref', 'eqref', 'cite', 'label'].includes(cmd)) {
+          } else if (['ref', 'eqref'].includes(cmd)) {
+            // reference to a labelled block — hover highlights it, click jumps
+            out += `<span class="refchip" data-label="${esc(g.body)}">${esc(g.body)}</span>`;
+            i = g.end;
+            continue;
+          } else if (['cite', 'label'].includes(cmd)) {
             out += `<span class="chip">${cmd}:${esc(g.body)}</span>`;
           } else if (cmd === 'url') {
             out += `<code>${esc(g.body)}</code>`;
@@ -1009,7 +1014,7 @@ function figureParts(src) {
 }
 
 function stripCommentDecorations(s) {
-  return s.replace(/[-=]{3,}/g, '').replace(/[ \t]{2,}/g, ' ').trim();
+  return s.replace(/[-=.]{3,}/g, '').replace(/[ \t]{2,}/g, ' ').trim();
 }
 
 function listItems(src) {
@@ -3895,6 +3900,13 @@ function showCitePopup(span) {
   pfPopup = pop;
 }
 
+// block containing \label{key} (simple includes - labels are unique)
+function labelBlock(key) {
+  if (!state.doc) return null;
+  return state.doc.blocks.find(b2 =>
+    b2.source.includes('\\label{' + key + '}')) || null;
+}
+
 function initProofHover() {
   document.addEventListener('mouseover', ev => {
     const cite = ev.target.closest && ev.target.closest('.citeref');
@@ -3914,6 +3926,16 @@ function initProofHover() {
     } else if (pfPopup) {
       clearTimeout(pfHideTimer); // pointer is on the popup
     }
+  });
+  document.addEventListener('click', ev => {
+    const chip = ev.target.closest && ev.target.closest('.refchip');
+    if (!chip) return;
+    const blk = labelBlock(chip.dataset.label);
+    if (!blk) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    hideProofPopup();
+    scrollToBlock(blk.id);
   });
   document.addEventListener('scroll', () => {
     if (pfPopup) hideProofPopup();
