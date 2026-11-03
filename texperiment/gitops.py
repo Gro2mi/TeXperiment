@@ -242,6 +242,17 @@ def changed_block_ids(store):
 MAX_OPS = 200  # beyond this a block falls back to "all new"
 
 
+def _visible_tex(s):
+    r"""What the reader actually sees: drop formatting wrappers and
+    command names, keep the words."""
+    s = re.sub(r'\\(?:textbf|textit|emph|underline|texttt|textsc|mbox)\{', '', s)
+    s = re.sub(r'\\textcolor\{[^{}]*\}\{', '', s)
+    s = re.sub(r'\\[a-zA-Z]+\*?', '', s)
+    s = s.replace('{', '').replace('}', '')
+    s = s.replace('\\&', '&').replace('\\%', '%')
+    return re.sub(r'\s+', ' ', s).strip()
+
+
 def _word_diff(old, new):
     r"""Phrase-level diff → (adds, dels) in *current source* coordinates.
 
@@ -284,8 +295,16 @@ def _word_diff(old, new):
     adds, dels = [], []
     for r in regions:
         old_text = ''.join(r['old'])
-        if not old_text.strip() and new[r['b_start']:r['b_end']].strip() == '':
+        new_text = new[r['b_start']:r['b_end']]
+        if not old_text.strip() and not new_text.strip():
             continue  # whitespace-only reshuffle
+        # formatting-only change (bold/italic/color applied to the same
+        # words): the text is unchanged, only wrapped - show the new
+        # formatted text green and skip the red placeholder
+        if _visible_tex(old_text) == _visible_tex(new_text):
+            if r['b_end'] > r['b_start']:
+                adds.append({'s': r['b_start'], 'e': r['b_end']})
+            continue
         if r['b_end'] > r['b_start']:
             adds.append({'s': r['b_start'], 'e': r['b_end']})
         if old_text.strip():
