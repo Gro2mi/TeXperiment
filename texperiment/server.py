@@ -372,6 +372,8 @@ def _parse_bbl(text):
 def _latex_clean(s):
     """Strip braces and resolve common accents for display strings."""
     s = s.replace('~', ' ')
+    for a, b in (('\\,', ' '), ('\\;', ' '), ('\\:', ' '), ('\\!', '')):
+        s = s.replace(a, b)
     for a, b in (('\\"a', 'ä'), ('\\"o', 'ö'), ('\\"u', 'ü'), ('\\"A', 'Ä'),
                  ('\\"O', 'Ö'), ('\\"U', 'Ü'), ("\\'a", 'á'), ("\\'e", 'é'),
                  ("\\'i", 'í'), ("\\'o", 'ó'), ("\\'u", 'ú'), ('\\`e', 'è'),
@@ -404,10 +406,11 @@ def _tex_plain(s):
     s = re.sub(r'\\newblock\s*', ' ', s)
     s = re.sub(r'\\href\s*\{[^}]*\}\s*\{([^}]*)\}', r'\1', s)
     s = re.sub(r'\\(?:emph|textit|textbf|texttt|textsc|mbox|text|url|textrm)\s*\{([^{}]*)\}', r'\1', s)
-    for a, b in (('\\&', '&'), ('\\%', '%'), ('\\_', '_'), ('\\$', '$'),
+    for a, b in (('\\,', ' '), ('\\;', ' '), ('\\:', ' '), ('\\!', ''),
+                 ('\\&', '&'), ('\\%', '%'), ('\\_', '_'), ('\\$', '$'),
                  ('\\{', '{'), ('\\}', '}')):
         s = s.replace(a, b)
-    s = re.sub(r'\\[a-zA-Z]+\*?\s*', '', s)   # remaining bare commands out
+    s = re.sub(r'\\[a-zA-Z]+\*?\s*', ' ', s)   # remaining bare commands out
     s = s.replace('{', '').replace('}', '')
     s = re.sub(r'---?', '–', s)               # en/em dashes
     s = re.sub(r'\s+', ' ', s).strip()

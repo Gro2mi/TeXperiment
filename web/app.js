@@ -135,6 +135,8 @@ function groupDigits(s) {
   return m[1] + m[2].replace(/\B(?=(\d{3})+(?!\d))/g, '\u2009') + (m[3] || '');
 }
 const SPACING_CMDS = new Set(['', 'par', 'newline', 'noindent', 'quad', 'qquad',
+  'thinspace', 'enspace', 'medspace', 'thickspace', 'negthinspace',
+  'negmedspace', 'negthickspace',
   'big', 'Big', 'bigl', 'Bigl', 'left', 'right', 'centering', 'small', 'large',
   'normalsize', 'hfill', 'vspace', 'hspace', 'clearpage', 'newpage']);
 
@@ -413,7 +415,14 @@ function renderInline(src, marks, git) {
     if (c === '\\') {
       const m = /^\\([a-zA-Z]+)\*?/.exec(src.slice(i));
       if (!m) { // escaped char like \% \& \$ \_ \#
-        if (i + 1 < n) { out += esc(src[i + 1]); i += 2; }
+        if (i + 1 < n) {
+          const nx = src[i + 1];
+          // \, \; \: are spacing commands (thin/medium space) — render
+          // as space; \! is negative space — renders nothing
+          if (',;:'.includes(nx)) { out += ' '; i += 2; }
+          else if (nx === '!') { i += 2; }
+          else { out += esc(nx); i += 2; }
+        }
         else { out += esc(c); i++; }
         continue;
       }
@@ -491,7 +500,8 @@ function renderInline(src, marks, git) {
       if (cmd === 'item') { i = after; continue; }
       if (SPACING_CMDS.has(cmd)) {
         out += (cmd === 'quad' || cmd === 'qquad') ? '&nbsp;&nbsp;'
-          : (cmd === 'newline' ? '<br>' : ' ');
+          : (cmd === 'newline' ? '<br>'
+            : (cmd.startsWith('neg') ? '' : ' '));
         i = after;
         const g = readGroup(src, after); // consume arg of vspace/hspace
         if (g && ['vspace', 'hspace'].includes(cmd)) i = g.end;
