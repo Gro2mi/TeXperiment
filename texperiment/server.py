@@ -273,6 +273,57 @@ class Store:
                     return x['id']
             return None
 
+    # -- whole-section editing -------------------------------------------------
+    def _enclosing_section(self, bid):
+        """(same-file blocks, index of the section heading) containing block
+        bid — bid may be the heading itself. None when it lives outside any
+        section or a non-editable block separates it from the heading."""
+        b = self._block(bid)
+        same = [x for x in self.doc['blocks'] if x['file'] == b['file']]
+        i = same.index(b)
+        k = i if b['type'] == 'section' else None
+        if k is None:
+            for j in range(i - 1, -1, -1):
+                if same[j]['type'] == 'section':
+                    k = j
+                    break
+        if k is None or self._section_end(same, k) <= i:
+            return None
+        return same, k
+
+    def section_span(self, bid):
+        """Exact on-disk span of the section containing block bid, or None.
+        The span includes the heading, the inter-block separators and any
+        comment blocks, so an editor showing it can patch it back lossless."""
+        with self.lock:
+            found = self._enclosing_section(bid)
+            if found is None:
+                return None
+            same, k = found
+            end = self._section_end(same, k)
+            head = same[k]
+            text, _ = self._read(head['file'])
+            s, e = head['start'], same[end - 1]['end']
+            return {'file': head['file'], 'start': s, 'end': e,
+                    'source': text[s:e],
+                    'ids': [x['id'] for x in same[k:end]],
+                    'heading_id': head['id'], 'level': self._level(head),
+                    'title': (head.get('meta') or {}).get('title', '')}
+
+    def op_save_section(self, bid, new_source):
+        with self.lock:
+            found = self._enclosing_section(bid)
+            if found is None:
+                raise ValueError(f'block {bid} is not inside a section')
+            same, k = found
+            end = self._section_end(same, k)
+            s, e = same[k]['start'], same[end - 1]['end']
+            text, _ = self._read(same[k]['file'])
+            nt = patch(text, s, e, text[s:e], new_source)
+            if nt is None:
+                raise ConflictError('section no longer matches on disk')
+            self._write_and_rebuild(same[k]['file'], nt, 'edit section')
+
     # -- raw file access ------------------------------------------------------
     def _check_rel(self, rel, must_be_tex):
         p = (self.root / rel).resolve()
@@ -573,6 +624,18 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
     def insert_block(pid: str, body: InsertBody):
         new_id = _run(get_project(pid).store.op_insert, body.after, body.source)
         return {'ok': True, 'new_id': new_id, 'doc': get_project(pid).store.doc}
+
+    @app.get('/api/project/{pid}/block/{bid}/section')
+    def get_section(pid: str, bid: str):
+        span = _run(get_project(pid).store.section_span, bid)
+        if span is None:
+            raise HTTPException(404, 'block is not inside a section')
+        return span
+
+    @app.post('/api/project/{pid}/block/{bid}/section/save')
+    def save_section(pid: str, bid: str, body: SaveBody):
+        _run(get_project(pid).store.op_save_section, bid, body.source)
+        return {'ok': True, 'doc': get_project(pid).store.doc}
 
     @app.get('/api/project/{pid}/file')
     def get_file(pid: str, path: str):

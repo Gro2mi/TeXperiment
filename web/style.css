@@ -21,6 +21,18 @@
   --soft-bg: #262b33;     /* preamble cards etc. */
   --soft-ink: #9aa2ae;
   --chip-bg: #2a313b;     /* command chips on paper */
+  --ref-chip-ink: #9ecbff;     /* \ref/\eqref chips: other references */
+  --ref-chip-bg: rgba(59, 130, 246, .13);
+  --ref-chip-line: #33507c;
+  --ref-none-ink: #f2b4b4;     /* \ref chips whose label doesn't exist */
+  --ref-none-bg: #4d2222;
+  --ref-none-line: #833c3c;
+  --cite-chip-ink: #d3b8f8;    /* citation chips: paper references */
+  --cite-chip-bg: rgba(150, 110, 240, .16);
+  --cite-chip-line: #574387;
+  --cmd-chip-ink: #ecc978;     /* chips for commands the renderer doesn't know */
+  --cmd-chip-bg: rgba(222, 170, 80, .13);
+  --cmd-chip-line: #6d5930;
   --ok-ink: #8fe6a8;      /* suggestion accents */
   --flash-bg: #6b2a2a;    /* proof word flash */
   --git-change-bg: #22392c;
@@ -43,6 +55,18 @@ html[data-theme='light'] {
   --soft-bg: #f4f4ef;
   --soft-ink: #666;
   --chip-bg: #eef1f5;
+  --ref-chip-ink: #1d5fbe;
+  --ref-chip-bg: #e5efff;
+  --ref-chip-line: #bfd6f5;
+  --ref-none-ink: #8a2323;
+  --ref-none-bg: #fadddd;
+  --ref-none-line: #eabcbc;
+  --cite-chip-ink: #6d3fc0;
+  --cite-chip-bg: #f1eaff;
+  --cite-chip-line: #d8c8f4;
+  --cmd-chip-ink: #8a6414;
+  --cmd-chip-bg: #fdf3da;
+  --cmd-chip-line: #e7d5a4;
   --ok-ink: #1d7a43;
   --flash-bg: #f6c9c9;
   --git-change-bg: #f0faf1;
@@ -81,6 +105,11 @@ body {
 #edtoolbar button {
   flex: 1; background: #2e343d; color: var(--side-ink); border: 1px solid #3c434e;
   border-radius: 5px; padding: 4px 9px; cursor: pointer; font-size: 12px;
+}
+#edtoolbar select {
+  flex: 0 0 auto; width: 58px; background: #2e343d; color: var(--side-ink);
+  border: 1px solid #3c434e; border-radius: 5px; padding: 3px 3px;
+  cursor: pointer; font-size: 12px;
 }
 #edtoolbar button:hover:not(:disabled) { background: #3a424d; color: #fff; }
 #edtoolbar button:disabled { opacity: .35; cursor: default; }
@@ -125,7 +154,7 @@ body {
   max-width: 840px; margin: 0 auto; background: var(--panel);
   border: 1px solid var(--panel-line); border-radius: 6px;
   padding: 56px 72px; box-shadow: 0 1px 4px rgba(0,0,0,.05);
-  font-family: var(--serif); font-size: 17px; line-height: 1.65;
+  font-family: var(--serif); font-size: var(--doc-size, 17px); line-height: 1.65;
 }
 
 /* blocks */
@@ -144,7 +173,7 @@ body {
 }
 .b-enddoc { opacity: .6; }
 .block.b-hidden, .block.b-collapsed { display: none; }
-.insertline.b-collapsed { display: none; }
+.insertline.b-collapsed, .sbsrow.b-collapsed { display: none; }
 h1.blk, h2.blk, h3.blk, h4.blk { position: relative; }
 .collapsebtn {
   position: absolute; left: -34px; top: 50%; transform: translateY(-50%);
@@ -169,7 +198,7 @@ h3.blk { font-size: 1.22em; } h4.blk { font-size: 1.05em; }
 
 .rtext p { margin: .55em 0; }
 .rtext .icomment { color: var(--comment); font-size: .85em; font-family: var(--mono); }
-.chip {
+.chip, .refchip, .citechip, .cmdchip {
   font-family: var(--mono); font-size: .72em; background: var(--chip-bg);
   border: 1px solid var(--panel-line); color: var(--panel-ink); border-radius: 8px; padding: 1px 7px;
   white-space: normal; word-break: break-word;
@@ -246,7 +275,26 @@ table.rtab td, table.rtab th { border: 1px solid #999; padding: 4px 12px; font-s
   resize: vertical; min-height: 60px; background: var(--panel); color: var(--panel-ink);
 }
 .editor textarea:focus { outline: 1px solid var(--accent); }
-math-field { display: block; width: 100%; min-height: 54px; padding: 6px; border: 1px solid var(--panel-line); border-radius: 4px; background: var(--panel); font-size: 19px; }
+math-field {
+  display: block; width: 100%; min-height: 54px; padding: 6px;
+  border: 1px solid var(--panel-line); border-radius: 4px;
+  background: var(--panel); font-size: 19px;
+  /* MathLive ink follows the inherited color; the vars theme caret,
+     selection and focus ring — all keyed to the active theme
+     (black-on-dark otherwise) */
+  color: var(--panel-ink);
+  --caret-color: var(--panel-ink);
+  --selection-background-color: var(--sel-bg);
+  --selection-color: var(--panel-ink);
+  --contains-highlight-background-color: var(--hover-bg);
+  --focus-border-color: var(--accent);
+}
+/* the UA focus ring (outline: auto) renders in the OS accent color —
+   amber on this machine; use the app's focus style instead */
+math-field:focus, math-field:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
 .edpreview { border-top: 1px dashed var(--panel-line); margin-top: 8px; padding-top: 8px; font-family: var(--serif); font-size: 15.5px; }
 
 /* table grid editor */
@@ -635,11 +683,17 @@ tr.rulegap td:hover .ruleadd { display: inline; }
 /* flash the flagged word when its issue row is clicked */
 .pf-err.pf-flash { animation: pfflash 2.4s ease-out; border-radius: 3px; }
 
-/* resolved citation references */
+/* resolved citation references — violet chips, hover shows the paper */
 .citeref {
   cursor: help;
-  border-bottom: 1px dotted var(--muted);
+  font-size: .85em;
+  border-radius: 8px; padding: 1px 7px;
+  white-space: normal; word-break: break-word;
+  color: var(--cite-chip-ink);
+  background: var(--cite-chip-bg);
+  border: 1px solid var(--cite-chip-line);
 }
+.citeref:hover { border-color: var(--cite-chip-ink); }
 .citepopup { max-width: 580px; }
 .citeitem { margin-bottom: 7px; }
 .citeitem:last-child { margin-bottom: 0; }
@@ -687,10 +741,30 @@ tr.rulegap td:hover .ruleadd { display: inline; }
 /* ---------- reference chips: hover/click jump to target ---------- */
 .refchip {
   cursor: pointer;
-  border-bottom: 1px dotted var(--muted);
-  color: var(--accent);
+  color: var(--ref-chip-ink);
+  background: var(--ref-chip-bg);
+  border-color: var(--ref-chip-line);
 }
-.refchip:hover { text-decoration: underline; }
+.refchip:hover { border-color: var(--accent); }
+/* label missing from the document — the jump would do nothing */
+.refchip.ref-unresolved {
+  color: var(--ref-none-ink);
+  background: var(--ref-none-bg);
+  border-color: var(--ref-none-line);
+}
+.refchip.ref-unresolved:hover { border-color: var(--ref-none-ink); }
+/* raw \cite source when the bibliography can't resolve it — same violet */
+.citechip {
+  color: var(--cite-chip-ink);
+  background: var(--cite-chip-bg);
+  border-color: var(--cite-chip-line);
+}
+/* commands the renderer doesn't know — amber, so they stand out */
+.cmdchip {
+  color: var(--cmd-chip-ink);
+  background: var(--cmd-chip-bg);
+  border-color: var(--cmd-chip-line);
+}
 .block.ref-target {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -813,3 +887,38 @@ tr.rulegap td:hover .ruleadd { display: inline; }
 }
 .browseitem:hover { background: var(--hover-bg); }
 .browseitem.tex { color: #1d4ed8; font-family: var(--mono); font-size: 12.5px; }
+
+/* ---------- side-by-side mode: rendered left, raw source right ---------- */
+#edtoolbar button.toggled {
+  background: var(--toggled-bg); color: #fff; border-color: var(--toggled-border);
+}
+.doc.sbs {
+  max-width: min(1680px, 100%);
+  padding: 40px 36px;
+}
+.sbsrow {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 2px 18px; align-items: start;
+}
+.sbsrow .block { margin: 2px 0; }
+.sbsraw {
+  min-width: 0; margin: 2px 0;
+  font-family: var(--mono); font-size: var(--doc-size, 17px); line-height: 1.5;
+  background: var(--soft-bg); border: 1px solid var(--panel-line);
+  border-radius: 6px; padding: 5px 9px;
+}
+.sbsraw .rawsrc {
+  white-space: pre-wrap; word-break: break-word; color: var(--panel-ink);
+  cursor: text; min-height: 14px;
+}
+.sbsraw.ro .rawsrc { color: var(--muted); cursor: default; }
+.sbsraw.editing { border-color: var(--accent); background: var(--panel); }
+.sbsrawbar { display: flex; gap: 6px; align-items: center; margin: 2px 0 6px; }
+.sbsrawbar .spacer { flex: 1; }
+.sbsraw textarea {
+  width: 100%; box-sizing: border-box;
+  font-family: var(--mono); font-size: inherit; line-height: 1.5;
+  border: 1px solid var(--panel-line); border-radius: 4px; padding: 6px 8px;
+  background: var(--panel); color: var(--panel-ink); resize: vertical;
+}
+.sbsraw textarea:focus { outline: 1px solid var(--accent); }

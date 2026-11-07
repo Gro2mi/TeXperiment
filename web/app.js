@@ -11,6 +11,9 @@ const state = {
   doc: null,
   ws: null,
   edit: null,        // {id, kind, original, root, block}
+  rawEdit: null,     // side-by-side raw cell being edited {id, block, original, ta}
+  sbs: localStorage.getItem('sbs') === '1', // side-by-side mode (persisted)
+  docSize: parseFloat(localStorage.getItem('doc-size')) || 17, // document font size
   browsePath: null,  // disk browser location
   collapsed: new Set(), // section block ids hidden via their chevron
   git: null,         // last /git/status payload (null = not fetched yet)
@@ -106,10 +109,21 @@ const UNIT_MACROS = {kilo: 'k', centi: 'c', milli: 'm', micro: 'µ', nano: 'n',
   metre: 'm', meter: 'm', gram: 'g', second: 's', kelvin: 'K', mole: 'mol',
   hour: 'h', day: 'd', percent: '%', degree: '°', metrePerSecond: 'm/s'};
 
+// Unicode superscripts for unit exponents (\SI{20}{kg.m^{-2}} → kg m⁻²);
+// characters without a superscript form pass through unchanged
+const SUPER_CHARS = {'-': '⁻', '+': '⁺', '0': '⁰', '1': '¹', '2': '²',
+  '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹'};
+
 function renderUnit(u) {
   let s = u.replace(/\\squared\b/g, '²').replace(/\\cubic\b/g, '³')
            .replace(/\\per\b/g, '/');
   s = s.replace(/\\([a-zA-Z]+)/g, (m, name) => UNIT_MACROS[name] ?? name);
+  // exponents: ^{-2}, ^{2}, ^-2, ^2 → superscript characters
+  s = s.replace(/\^\{([^}]*)\}/g, (m, e) =>
+        [...e].map(ch => SUPER_CHARS[ch] ?? ch).join(''))
+       .replace(/\^([0-9+-])/g, (m, c) => SUPER_CHARS[c]);
+  // siunitx unit products: `.` and `~` separate units → thin space
+  s = s.replace(/[.~]/g, '\u2009');
   return s.replace(/\\[,;:! ]/g, '\u2009').trim();
 }
 
@@ -187,8 +201,10 @@ const SI_PREFIX_MATH = { kilo: 'k', hecto: 'h', deci: 'd', centi: 'c',
   milli: 'm', micro: '\\mu', nano: 'n', mega: 'M', giga: 'G', tera: 'T' };
 
 // siunitx unit string → KaTeX math fragment ("m\\,s^{-1}" style)
-// siunitx unit string → KaTeX math fragment ("m\\,s^{-1}" style)
 function siUnitToMath(u) {
+  // `.` and `~` are siunitx unit products → thin space; the exponent part of
+  // e.g. "kg.m^{-2}" passes through for KaTeX to typeset
+  u = u.replace(/[.~]/g, '\\,');
   const parts = [];   // {sym, exp, kind} — kind: 'unit' | 'raw' | 'lit'
   let prefix = '';    // pending siunitx prefix (\\kilo + \\metre → km)
   let inv = 0;        // pending \\per depth
@@ -450,7 +466,7 @@ function renderInline(src, marks, git) {
             continue;
           }
           const optStr = opts.length ? '[' + opts.join('][') + ']' : '';
-          out += `<span class="chip">${esc(cmd)}${esc(optStr)}{${esc(g.body)}}</span>`;
+          out += `<span class="citechip">${esc(cmd)}${esc(optStr)}{${esc(g.body)}}</span>`;
           i = g.end;
           continue;
         }
@@ -476,12 +492,16 @@ function renderInline(src, marks, git) {
           if (cmd === 'footnote') {
             out += `<sup class="fn" title="footnote">${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</sup>`;
           } else if (['ref', 'eqref'].includes(cmd)) {
-            // reference to a labelled block — hover highlights it, click jumps
-            out += `<span class="refchip" data-label="${esc(g.body)}">${esc(g.body)}</span>`;
+            // reference to a labelled block — hover highlights it, click jumps.
+            // dark red when the label doesn't exist (same test as the jump)
+            const ok = !!(state.doc && labelBlock(g.body));
+            out += `<span class="refchip${ok ? '' : ' ref-unresolved'}" data-label="${esc(g.body)}">${esc(g.body)}</span>`;
             i = g.end;
             continue;
-          } else if (['cite', 'label'].includes(cmd)) {
-            out += `<span class="chip">${cmd}:${esc(g.body)}</span>`;
+          } else if (cmd === 'cite') {
+            out += `<span class="citechip">cite:${esc(g.body)}</span>`;
+          } else if (cmd === 'label') {
+            out += `<span class="chip">label:${esc(g.body)}</span>`;
           } else if (cmd === 'url') {
             out += `<code>${esc(g.body)}</code>`;
           } else if (cmd === 'textbf') {
@@ -557,7 +577,7 @@ function renderInline(src, marks, git) {
         }
         break;
       }
-      out += `<span class="chip">\\${esc(cmd)}${esc(parts.join(''))}</span>`;
+      out += `<span class="cmdchip">\\${esc(cmd)}${esc(parts.join(''))}</span>`;
       i = j;
     } else if (c === '$') {
       if (src[i + 1] === '$') { i += 2; continue; } // display math is block-level
@@ -1024,7 +1044,12 @@ function figureParts(src) {
 }
 
 function stripCommentDecorations(s) {
-  return s.replace(/[-=.]{3,}/g, '').replace(/[ \t]{2,}/g, ' ').trim();
+  // drop lines that hold nothing but % and - = . decorations (dotted/dashed
+  // rules); the remaining lines keep their text, decoration runs stripped
+  const lines = s.split('\n')
+    .filter(line => line.replace(/[%\-=. \t]/g, '').length > 0);
+  return lines.join('\n')
+    .replace(/[-=.]{3,}/g, '').replace(/[ \t]{2,}/g, ' ').trim();
 }
 
 function listItems(src) {
@@ -1299,7 +1324,9 @@ function updateOutlineCurrent() {
   for (const b of state.doc.blocks) {
     if (b.type !== 'section') continue;
     const node = document.querySelector(`.block[data-id="${b.id}"]`);
-    if (!node) continue;
+    // hidden blocks (collapsed, blank comment separators) sit at 0/0 and
+    // would always "pass" — skip them or they pin the indicator
+    if (!node || !node.offsetHeight) continue;
     if (node.getBoundingClientRect().top <= 140) currentId = b.id;
   }
   document.querySelectorAll('#outline .oitem').forEach(it =>
@@ -1308,7 +1335,7 @@ function updateOutlineCurrent() {
   let currentFile = null;
   for (const b of state.doc.blocks) {
     const node = document.querySelector(`.block[data-id="${b.id}"]`);
-    if (!node) continue;
+    if (!node || !node.offsetHeight) continue;
     if (node.getBoundingClientRect().top <= 140) currentFile = b.file;
   }
   document.querySelectorAll('#filelist .fitem').forEach(it =>
@@ -1381,7 +1408,8 @@ function renderContent() {
     }
   }
   const hiddenIds = computeCollapsedIds(blocks);
-  const docEl = el('div', 'doc');
+  // side-by-side: the sheet doubles in width — two document columns
+  const docEl = el('div', 'doc' + (state.sbs ? ' sbs' : ''));
   // git ghost rows: blocks removed since HEAD (only with highlighting on)
   const ghosts = (state.gitHl && state.git && state.git.repo
     && state.gitDiff && state.gitDiff.ghosts) ? state.gitDiff.ghosts : [];
@@ -1398,7 +1426,16 @@ function renderContent() {
   for (let i = 0; i < blocks.length; i++) {
     const b = blocks[i];
     const h = hiddenIds.has(b.id);
-    docEl.append(blockEl(b, h));
+    if (state.sbs) {
+      // one row per block: rendered left, raw source right — tops aligned
+      const row = el('div', 'sbsrow' +
+        (h || isBlankComment(b) ? ' b-collapsed' : ''));
+      row.append(blockEl(b));
+      row.append(rawCell(b));
+      docEl.append(row);
+    } else {
+      docEl.append(blockEl(b, h));
+    }
     if (EDITABLE.has(b.type)) {
       // the insert line sits between two blocks: visible only if both are;
       // never between a heading and the \label{} that names it
@@ -1420,6 +1457,121 @@ function insertLine(b, hidden = false) {
   line.onclick = ev => { ev.stopPropagation(); showInsertMenu(b, ev); };
   line.append(el('span', 'insertbtn', '+'));
   return line;
+}
+
+/* ------------------------------------------------------------------ */
+/* side-by-side mode: raw column with per-block source editing         */
+/* ------------------------------------------------------------------ */
+
+function rawCell(b) {
+  const cell = el('div', 'sbsraw');
+  cell.dataset.id = b.id;
+  if (state.rawEdit && state.rawEdit.id === b.id) {
+    buildRawEditor(cell, b, state.rawEdit.ta.value);
+    return cell;
+  }
+  if (!EDITABLE.has(b.type)) {
+    cell.classList.add('ro');
+    cell.append(el('div', 'rawsrc', esc(b.source)));
+    return cell;
+  }
+  const src = el('div', 'rawsrc', esc(b.source));
+  src.title = 'Click to edit the raw source';
+  src.addEventListener('click', () => activateRawEditor(b));
+  cell.append(src);
+  return cell;
+}
+
+function stopRawEditListener() {
+  if (state._rawEscHandler) {
+    document.removeEventListener('keydown', state._rawEscHandler, true);
+    state._rawEscHandler = null;
+  }
+}
+
+// turn the raw cell of block b into a live editor (optionally carrying
+// over in-progress text across background re-renders)
+function activateRawEditor(b, preset) {
+  if (state.edit) closeEditor();          // one active editor at a time
+  if (state.rawEdit) cancelRawEdit();     // and one raw cell
+  const cell = $(`.sbsraw[data-id="${b.id}"]`);
+  if (!cell) return;
+  cell.innerHTML = '';
+  buildRawEditor(cell, b, preset !== undefined ? preset : b.source);
+}
+
+function buildRawEditor(cell, b, value) {
+  stopRawEditListener();
+  cell.classList.add('editing');
+  const bar = el('div', 'sbsrawbar');
+  const saveBtn = el('button', 'edbtn primary', '✓ Save');
+  const cancelBtn = el('button', 'edbtn', 'Cancel');
+  bar.append(cancelBtn, el('span', 'spacer'), saveBtn);
+  bar.append(el('span', 'hint', 'Ctrl+Enter saves · Esc cancels'));
+  cell.append(bar);
+  const ta = el('textarea');
+  ta.value = value;
+  ta.rows = Math.min(Math.max(value.split('\n').length + 1, 4), 30);
+  ta.spellcheck = false;
+  attachAutoGrow(ta); // grow with the content, capped at 35% of the screen
+  attachAutocomplete(ta); // cite keys + \ref/\label targets + commands
+  cell.append(ta);
+
+  const commit = async () => {
+    const src = reflowLongLines(ta.value);
+    if (src === state.rawEdit.original) { cancelRawEdit(); return; }
+    const ref = state.rawEdit;
+    state.rawEdit = null;
+    stopRawEditListener();
+    try {
+      const res = await ppost(`/block/${ref.id}/save`, {source: src});
+      applyDoc(res.doc);
+      toast('Saved');
+      checkBlocks([ref.id]); // background re-check of the edited block
+      refreshGitSoon(); // prompt green/red diff marks for the edit
+    } catch (e) {
+      handleOpError(e, ref.block);
+    }
+  };
+  saveBtn.onclick = commit;
+  cancelBtn.onclick = () => cancelRawEdit();
+  ta.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      commit();
+    }
+  });
+  state.rawEdit = {id: b.id, block: b, original: b.source, ta};
+  state._rawEscHandler = ev => {
+    if (ev.key === 'Escape' && !document.querySelector('.acpopup')) {
+      ev.stopPropagation();
+      ev.preventDefault();
+      cancelRawEdit();
+    }
+  };
+  document.addEventListener('keydown', state._rawEscHandler, true);
+  ta.focus();
+}
+
+function cancelRawEdit() {
+  const ref = state.rawEdit;
+  stopRawEditListener();
+  state.rawEdit = null;
+  if (!ref) return;
+  // rebuild the cell statically — no full re-render needed
+  const cell = $(`.sbsraw[data-id="${ref.id}"]`);
+  if (!cell) return;
+  cell.classList.remove('editing');
+  cell.innerHTML = '';
+  if (EDITABLE.has(ref.block.type)) {
+    const src = el('div', 'rawsrc', esc(ref.block.source));
+    src.title = 'Click to edit the raw source';
+    src.addEventListener('click', () => activateRawEditor(ref.block));
+    cell.append(src);
+  } else {
+    cell.classList.add('ro');
+    cell.append(el('div', 'rawsrc', esc(ref.block.source)));
+  }
 }
 
 function blockEl(b, hidden = false) {
@@ -1668,6 +1820,12 @@ function closeEditor() {
     state._escHandler = null;
   }
   const b = blockById(state.edit.id);
+  if (state.edit.hiddenIds) {
+    for (const id of state.edit.hiddenIds) {
+      const n = $(`.block[data-id="${id}"]`);
+      if (n) n.classList.remove('b-hidden');
+    }
+  }
   state.edit = null;
   if (b) rerenderBlock(b);
   closeOrphanAutocomplete(); // popups die with their editor (no blur event)
@@ -1678,6 +1836,7 @@ function closeEditor() {
 }
 
 function openEditor(b, freshOpts) {
+  if (state.rawEdit) cancelRawEdit(); // one active editor at a time
   if (state.edit) {
     if (state.edit.id === b.id) return;
     closeEditor();
@@ -1704,6 +1863,139 @@ function openEditor(b, freshOpts) {
   };
   document.addEventListener('keydown', state._escHandler, true);
   ed.focus();
+}
+
+// ids of the blocks forming the section containing bid (mirrors the
+// server's Store._enclosing_section/_section_end) — null when the block
+// lives outside any section, so the section-edit button can hide
+function enclosingSectionIds(bid) {
+  if (!state.doc) return null;
+  const blocks = state.doc.blocks;
+  const bi = blocks.findIndex(x => x.id === bid);
+  if (bi < 0) return null;
+  const file = blocks[bi].file;
+  let lo = bi, hi = bi;   // this file's blocks are one contiguous run
+  while (lo > 0 && blocks[lo - 1].file === file) lo--;
+  while (hi + 1 < blocks.length && blocks[hi + 1].file === file) hi++;
+  const same = blocks.slice(lo, hi + 1);
+  const i = bi - lo;
+  const lvl = x => (x.meta && x.meta.level) || 2;
+  let k = same[i].type === 'section' ? i : -1;
+  if (k < 0) {
+    for (let j = i - 1; j >= 0; j--) {
+      if (same[j].type === 'section') { k = j; break; }
+    }
+  }
+  if (k < 0) return null;
+  let end = k + 1;
+  while (end < same.length) {
+    const x = same[end];
+    if (x.type === 'preamble' || x.type === 'enddoc' ||
+        (x.type === 'section' && lvl(x) <= lvl(same[k]))) break;
+    end++;
+  }
+  if (end <= i) return null;  // non-editable barrier between heading and block
+  return same.slice(k, end).map(x => x.id);
+}
+
+// swap the open single-block editor for one covering the whole enclosing
+// section: exact on-disk span from the server, sibling blocks hidden until
+// the editor closes (Esc/Cancel restores, Save re-renders everything)
+async function expandEditorToSection(b) {
+  let sec;
+  try {
+    sec = await papi(`/block/${b.id}/section`);
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+  if (!state.edit || state.edit.id !== b.id) return; // closed in the meantime
+  const ed = {root: el('div', 'editor'), kind: 'source'};
+  const bar = el('div', 'edbar');
+  const commitBtn = el('button', 'edbtn primary', '✓ Save section');
+  const cancelBtn = el('button', 'edbtn', 'Cancel');
+  bar.append(cancelBtn, el('span', 'spacer'), commitBtn);
+  bar.append(el('span', 'hint',
+    'Editing the whole section · Ctrl+Enter saves · Esc cancels'));
+  ed.root.append(bar);
+
+  const commit = async () => {
+    const src = reflowLongLines(ed.getValue());
+    if (src === state.edit.original) { closeEditor(); return; }
+    const editRef = state.edit;
+    try {
+      const res = await ppost(`/block/${editRef.id}/section/save`, {source: src});
+      state.edit = null;
+      applyDoc(res.doc);
+      toast('Section saved');
+      refreshGitSoon(); // prompt green/red diff marks for the edit
+    } catch (e) {
+      handleOpError(e, editRef.block);
+    }
+  };
+  cancelBtn.onclick = () => closeEditor();
+  commitBtn.onclick = commit;
+
+  const ta = el('textarea');
+  ta.value = sec.source;
+  ta.rows = Math.min(Math.max(sec.source.split('\n').length + 1, 6), 40);
+  ta.spellcheck = false;
+  attachAutoGrow(ta); // grow with the content, capped at 35% of the screen
+  attachAutocomplete(ta);
+  attachFormatToolbar(ta);
+  ed.root.append(ta);
+  ta.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); }
+  });
+  ed.getValue = () => ta.value;
+  ed.focus = () => ta.focus();
+
+  // hide the rest of the section until the editor closes
+  const hiddenIds = (sec.ids || []).filter(id => id !== b.id);
+  for (const id of hiddenIds) {
+    const n = $(`.block[data-id="${id}"]`);
+    if (n) n.classList.add('b-hidden');
+  }
+
+  const node = $(`.block[data-id="${b.id}"]`);
+  const oldRoot = node && node.querySelector('.editor');
+  if (oldRoot) oldRoot.replaceWith(ed.root);
+  else if (node) node.querySelector('.bcontent').replaceWith(ed.root);
+  else return;
+  state.edit = {id: b.id, kind: 'source', original: sec.source, root: ed,
+    block: b, section: true, hiddenIds};
+  ed.focus();
+}
+
+// textarea auto-size for editors: grow with the content so editing needs
+// no inner scrolling, by default up to a fraction of the screen height.
+// Only the automatic size is capped — the user can still drag it taller,
+// and a manual size sticks until the content overflows again.
+function autoGrowTa(ta, capVh = 35) {
+  const cap = Math.round(window.innerHeight * capVh / 100);
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, cap) + 'px';
+}
+
+function attachAutoGrow(ta, capVh) {
+  // editors are built before their root joins the document, where
+  // scrollHeight reads 0 — defer the first sizing until connected
+  if (ta.isConnected) autoGrowTa(ta, capVh);
+  else requestAnimationFrame(() => autoGrowTa(ta, capVh));
+  // a manual drag of the resize handle takes over: auto-sizing stands down
+  // (a plain click into the text doesn't change the height, so no flag)
+  ta.addEventListener('pointerdown', () => {
+    const h = ta.style.height;
+    const up = () => {
+      if (ta.style.height !== h) ta._manualSize = true;
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointerup', up);
+  });
+  ta.addEventListener('input', () => {
+    if (ta._manualSize) return;
+    if (ta.scrollHeight > ta.clientHeight + 1) autoGrowTa(ta, capVh);
+  });
 }
 
 // soften lines longer than 120 chars: wrap at the last space before the
@@ -2125,6 +2417,7 @@ function buildEditor(b, kind, freshOpts) {
       applyDoc(res.doc);
       toast('Saved');
       checkBlocks([editRef.id]); // background re-check of the edited block
+      refreshGitSoon(); // prompt green/red diff marks for the edit
     } catch (e) {
       handleOpError(e, editRef.block);
     }
@@ -2135,6 +2428,12 @@ function buildEditor(b, kind, freshOpts) {
   cancelBtn.onclick = cancel;
 
   if (kind === 'source') {
+    if (enclosingSectionIds(b.id)) {
+      const secBtn = el('button', 'edbtn', 'Edit whole section');
+      secBtn.title = 'Edit the full section/subsection containing this block';
+      secBtn.onclick = () => expandEditorToSection(b);
+      cancelBtn.after(secBtn);
+    }
     bar.append(el('span', 'hint', 'Ctrl+Enter saves · Esc cancels'));
     const ta = el('textarea');
     ta.value = b.source;
@@ -2146,6 +2445,7 @@ function buildEditor(b, kind, freshOpts) {
     }
     ta.rows = Math.min(Math.max(b.source.split('\n').length + 1, 3), 24);
     ta.spellcheck = false;
+    attachAutoGrow(ta); // grow with the content, capped at 35% of the screen
     attachAutocomplete(ta); // cite keys + \ref/\label targets
   attachFormatToolbar(ta); // word-style B/I/U/color popup
     attachFormatToolbar(ta); // word-style B/I/U/color popup
@@ -2201,6 +2501,7 @@ function buildMathEditor(b, ed, bar, commit, cancel) {
   ta.value = innerNoLabels;
   ta.rows = Math.min(Math.max(innerNoLabels.split('\n').length + 1, 3), 18);
   ta.spellcheck = false;
+  attachAutoGrow(ta); // grow with the content, capped at 35% of the screen
   const prev = el('div', 'edpreview');
   srcWrap.append(ta, prev);
   const updSrc = () => { prev.innerHTML = katexSpan(ta.value, true); };
@@ -3161,8 +3462,26 @@ async function refreshGit() {
   applyGitHighlights();
   applyOutlineGitMarks();
   // inline diff marks and ghosts live in the rendered blocks — re-render
-  // when the diff set actually changed (not on every status refresh)
-  const sig = state.gitChanged.size + ':' + Object.keys(state.gitDiff.diffs).join(',');
+  // when the diff actually changed (not on every status refresh); the diff
+  // content is part of the signature, so re-editing an already-changed
+  // block refreshes its green/red word marks too
+  applyGitDiffRerender();
+}
+
+let _gitSoonTimer = null;
+// block edits should show their green/red diff marks promptly, not on the
+// next 30s status tick — debounce a git refresh after save bursts
+function refreshGitSoon(delay = 900) {
+  clearTimeout(_gitSoonTimer);
+  _gitSoonTimer = setTimeout(() => {
+    if (state.project && state.git && state.git.repo) refreshGit();
+  }, delay);
+}
+
+// re-render the blocks when the fetched diff actually changed; shared by
+// the status refresh and post-commit (HEAD moved → marks must clear)
+function applyGitDiffRerender() {
+  const sig = state.gitChanged.size + ':' + JSON.stringify(state.gitDiff.diffs);
   if (sig !== state._gitDiffSig) {
     state._gitDiffSig = sig;
     rerenderContentPreservingScroll();
@@ -3226,6 +3545,13 @@ function toggleDiffOnly() {
 
 function renderGit() {
   const panel = $('#gitpanel');
+  // the panel rebuilds on every status refresh — carry the commit message
+  // (with focus and caret) across, so a background refresh can't wipe
+  // what is being typed
+  const prevMsg = panel.querySelector('.gitmsg');
+  const keep = prevMsg ? {value: prevMsg.value,
+    focused: document.activeElement === prevMsg,
+    s: prevMsg.selectionStart, e: prevMsg.selectionEnd} : null;
   panel.innerHTML = '';
   $('#gitHead').classList.toggle('hidden', !state.project);
   if (!state.project) return;
@@ -3304,6 +3630,13 @@ function renderGit() {
       gitCommit(ta);
     }
   });
+  if (keep && keep.value) {
+    ta.value = keep.value;
+    if (keep.focused) {
+      ta.focus();
+      ta.setSelectionRange(keep.s, keep.e);
+    }
+  }
 }
 
 function gitFileGroup(title, paths, kind) {
@@ -3453,6 +3786,7 @@ async function gitCommit(ta) {
     renderGit();
     applyGitHighlights();
     applyOutlineGitMarks();
+    applyGitDiffRerender(); // HEAD moved — green/red marks must clear now
     toast('Committed: ' + res.summary);
   } catch (e) { toast('Commit failed: ' + e.message, true); }
 }
@@ -4188,6 +4522,17 @@ function restoreReadPos() {
 
 function applyDoc(doc, fromDisk = false) {
   updateHighlights(doc, fromDisk);
+  // capture the in-progress raw-side editor before the re-render rebuilds
+  // its DOM (value + caret — the old textarea won't survive renderAll)
+  let rawKeep = null;
+  if (state.rawEdit) {
+    rawKeep = {value: state.rawEdit.ta.value, sel: null};
+    if (document.activeElement === state.rawEdit.ta &&
+        typeof state.rawEdit.ta.selectionStart === 'number') {
+      rawKeep.sel = {s: state.rawEdit.ta.selectionStart,
+        e: state.rawEdit.ta.selectionEnd};
+    }
+  }
   // keep an open editor alive if its block still exists unchanged on disk
   let keep = null;
   if (state.edit) {
@@ -4208,6 +4553,27 @@ function applyDoc(doc, fromDisk = false) {
   state.doc = doc;
   pruneProofIssues(doc); // drop issues whose block text changed
   renderAll();
+
+  // keep an in-progress raw-side editor alive when its block survived the
+  // re-parse unchanged — same contract as the rendered editor above
+  if (state.rawEdit) {
+    const m = doc.blocks.find(x => x.file === state.rawEdit.block.file &&
+      x.source === state.rawEdit.original && x.type === state.rawEdit.block.type);
+    stopRawEditListener();
+    state.rawEdit = null;
+    if (m) {
+      const cell = $(`.sbsraw[data-id="${m.id}"]`);
+      if (cell) {
+        cell.innerHTML = '';
+        buildRawEditor(cell, m, rawKeep.value);
+        if (rawKeep.sel) {
+          const ta = cell.querySelector('textarea');
+          ta.focus();
+          ta.setSelectionRange(rawKeep.sel.s, rawKeep.sel.e);
+        }
+      }
+    }
+  }
 
   if (keep) {
     state.edit.id = keep.id;
@@ -4404,5 +4770,27 @@ connectWS();
   $('#themebtn').addEventListener('click', () =>
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
   applyTheme(localStorage.getItem('theme') || 'dark');
+  // document font size (rendered text + side-by-side raw source)
+  const sizeselect = $('#sizeselect');
+  const applyDocSize = () =>
+    document.documentElement.style.setProperty('--doc-size', state.docSize + 'px');
+  sizeselect.value = String(state.docSize);
+  applyDocSize();
+  sizeselect.addEventListener('change', () => {
+    state.docSize = parseFloat(sizeselect.value) || 17;
+    try { localStorage.setItem('doc-size', String(state.docSize)); } catch (e) {}
+    applyDocSize();
+  });
+  // side-by-side toggle (rendered left / raw source right)
+  const sbsbtn = $('#sbsbtn');
+  sbsbtn.classList.toggle('toggled', state.sbs);
+  sbsbtn.addEventListener('click', () => {
+    if (state.rawEdit) cancelRawEdit();
+    if (state.edit) closeEditor();
+    state.sbs = !state.sbs;
+    try { localStorage.setItem('sbs', state.sbs ? '1' : '0'); } catch (e) {}
+    sbsbtn.classList.toggle('toggled', state.sbs);
+    renderContentPreservingScroll();
+  });
   syncHistoryButtons();
 })();

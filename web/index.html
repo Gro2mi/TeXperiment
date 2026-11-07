@@ -9,7 +9,7 @@
 <script async src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script async src="https://cdn.jsdelivr.net/npm/mathlive@0.111.4/mathlive.min.js"></script>
 <script>document.documentElement.dataset.theme = localStorage.getItem('theme') || 'dark';</script>
-<link rel="stylesheet" href="/style.css?v=14">
+<link rel="stylesheet" href="/style.css?v=18">
 </head>
 <body>
 <div id="banner" class="hidden"></div>
@@ -21,6 +21,17 @@
     <div id="edtoolbar">
       <button id="undobtn" title="Undo last change (Ctrl+Z)" disabled>↩ Undo</button>
       <button id="redobtn" title="Redo (Ctrl+Shift+Z or Ctrl+Y)" disabled>↪ Redo</button>
+      <button id="sbsbtn" title="Side-by-side: rendered text left, raw source right">◫</button>
+      <select id="sizeselect" title="Font size of the document text (rendered and side-by-side raw)">
+        <option value="13">13</option>
+        <option value="14">14</option>
+        <option value="15">15</option>
+        <option value="16">16</option>
+        <option value="17">17</option>
+        <option value="18">18</option>
+        <option value="20">20</option>
+        <option value="22">22</option>
+      </select>
       <button id="themebtn" title="Switch between dark and light mode">☀</button>
     </div>
     <div class="sb-head sb-headrow" id="projHead"><span>Project</span><button id="projadd" title="Add project from disk">＋</button></div>
@@ -39,6 +50,6 @@
 <div id="browsemodal" class="hidden"></div>
 <div id="gitmodal" class="hidden"></div>
 <div id="toast" class="hidden"></div>
-<script defer src="/app.js?v=32"></script>
+<script defer src="/app.js?v=40"></script>
 </body>
 </html>
