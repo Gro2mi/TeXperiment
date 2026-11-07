@@ -7,6 +7,7 @@ the project inside the repo even when the repo toplevel is higher up.
 import difflib
 import re
 import subprocess
+import threading
 from pathlib import Path
 
 from .parser import parse_file
@@ -16,15 +17,22 @@ class GitError(Exception):
     """A git command failed; message is user-presentable."""
 
 
+# git commands touch .git/index under a lock — serialize our own so a
+# background `status` (which may refresh the index stat cache) can never
+# collide with a user-initiated `add`/`commit` (index.lock race)
+_GIT_LOCK = threading.Lock()
+
+
 def _run(root, *args, ok_codes=(0,), binary=False):
     """Run git in root; returns stdout (str with surrogates replaced, or bytes)."""
     cmd = ['git', '-c', 'core.quotepath=false', '-c', 'color.ui=false', *args]
-    try:
-        p = subprocess.run(cmd, cwd=str(root), capture_output=True, timeout=20)
-    except FileNotFoundError:
-        raise GitError('git is not installed or not on PATH')
-    except subprocess.TimeoutExpired:
-        raise GitError(f'git timed out: {args[0]}')
+    with _GIT_LOCK:
+        try:
+            p = subprocess.run(cmd, cwd=str(root), capture_output=True, timeout=20)
+        except FileNotFoundError:
+            raise GitError('git is not installed or not on PATH')
+        except subprocess.TimeoutExpired:
+            raise GitError(f'git timed out: {args[0]}')
     if p.returncode not in ok_codes:
         err = p.stderr.decode('utf-8', errors='replace').strip()
         raise GitError(err or f'git {args[0]} failed (exit {p.returncode})')
@@ -364,8 +372,8 @@ def block_diffs(store):
                                       if j1 + pairs < len(cur_blocks) else None),
                         'text': a[i1 + k]})
                 for k in range(pairs, j2 - j1):  # new blocks without partner
-                    diffs[cur_blocks[j1 + pairs + k]['id']] = {
-                        'kind': 'new', 'adds': [{'s': 0, 'e': len(b_raw[j1 + pairs + k])}],
+                    diffs[cur_blocks[j1 + k]['id']] = {
+                        'kind': 'new', 'adds': [{'s': 0, 'e': len(b_raw[j1 + k])}],
                         'dels': []}
             elif tag == 'insert':
                 for k in range(j1, j2):
