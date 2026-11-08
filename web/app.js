@@ -355,6 +355,9 @@ function renderCitation(cmd, opts, keys) {
   const wrap = s => `<span class="citeref" data-keys="${esc(keys.join(','))}">${s}</span>`;
   let html;
   if (bib.style === 'numeric') {
+    // a key known from .bib but not yet in the .bbl has no number —
+    // fall back to the raw chip rather than printing gaps
+    if (es.some(e => e.num === undefined)) return null;
     const nums = es.map(e => String(e.num)).join(', ');
     if (kind === 'year') html = esc(nums);
     else if (kind === 'yearpar') html = '(' + esc(nums) + ')';
@@ -4650,6 +4653,7 @@ function connectWS() {
   ws.onmessage = ev => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'reload' && msg.project === state.project) applyDoc(msg.doc, true);
+    if (msg.type === 'bib' && msg.project === state.project) refreshBib();
   };
 }
 

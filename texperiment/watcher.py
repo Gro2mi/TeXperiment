@@ -8,15 +8,17 @@ DEBOUNCE_S = 0.35
 
 
 class _Handler(FileSystemEventHandler):
-    def __init__(self, should_process, on_change):
+    def __init__(self, should_process, on_change, extensions=('.tex',)):
         self.should_process = should_process
         self.on_change = on_change
+        self.extensions = tuple(extensions)
         self._timer = None
         self._lock = threading.Lock()
 
     def _hit(self, path):
         p = str(path)
-        if not p.endswith('.tex') or p.endswith('.bak') or p.endswith('.tmp~'):
+        if not p.endswith(self.extensions) or p.endswith('.bak') \
+                or p.endswith('.tmp~'):
             return
         if not self.should_process(p):
             return
@@ -43,8 +45,8 @@ class _Handler(FileSystemEventHandler):
         self.on_change()
 
 
-def start_watcher(root, should_process, on_change):
-    handler = _Handler(should_process, on_change)
+def start_watcher(root, should_process, on_change, extensions=('.tex',)):
+    handler = _Handler(should_process, on_change, extensions)
     obs = Observer()
     obs.schedule(handler, str(root), recursive=True)
     obs.daemon = True

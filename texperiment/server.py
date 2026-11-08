@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from .parser import parse_file
 from .resolver import read_text_preserve, resolve_files
 from .storage import ConflictError, FileStore, patch
-from . import gitops, proof, watcher
+from . import bibparse, gitops, proof, watcher
 from .gitops import GitError
 from .proof import ProofError
 
@@ -536,6 +536,15 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
 
         watcher.start_watcher(proj.store.root, should_process, on_change)
 
+        def on_bib_change():
+            # citation data only — no LaTeX run, no doc rebuild; the
+            # client refetches /bibliography when it receives this
+            broadcast({'type': 'bib', 'project': proj.id})
+
+        # .bib edits (autocomplete source) and .bbl rewrites (bibtex ran)
+        watcher.start_watcher(proj.store.root, should_process, on_bib_change,
+                              extensions=('.bib', '.bbl'))
+
     def _run(op, *args):
         try:
             return op(*args)
@@ -893,11 +902,24 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
                             headers={'Cache-Control': 'no-store'})
 
     # -- bibliography (citation resolution from the compiled .bbl) --------------
-    @app.get('/api/project/{pid}/bibliography')
-    def bibliography_route(pid: str):
-        proj = get_project(pid)
+    def _bib_payload(proj):
+        """Citation data for autocomplete + hover popups.
+
+        The compiled .bbl is authoritative when present (real typeset
+        numbering, natbib style). .bib files in the project tree are parsed
+        directly as well, so keys not yet cited/bibited still autocomplete
+        and a project without any .bbl works too."""
         root = proj.store.root
         stem = proj.store.main_path.stem
+        bib_entries = []
+        for p in sorted(root.glob('*.bib')):
+            try:
+                text, _ = read_text_preserve(p)
+            except OSError:
+                continue
+            for e in bibparse.parse_bib(text):
+                e['file'] = p.name
+                bib_entries.append(e)
         # the .bbl sits wherever bibtex last ran — the latexmkrc out_dir,
         # the project root, or a build/ dir from an older rc setting; take
         # the newest one so an rc change can't orphan the references
@@ -909,28 +931,46 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         cands.append(root / 'build' / f'{stem}.bbl')
         cands = [c for c in cands if c.exists()]
         bbl = max(cands, key=lambda c: c.stat().st_mtime) if cands else None
-        if bbl is None:
-            return {'available': False, 'style': 'numeric', 'entries': []}
-        entries = []
-        for num, (key, label, raw) in enumerate(
-                _parse_bbl(bbl.read_text(encoding='utf-8', errors='replace')), 1):
-            authors = year = ''
-            if label:
-                clean = _latex_clean(label)
-                m = re.match(r'^(.*?)\(([^()]*)\)', clean)
-                if m:
-                    authors, year = m.group(1).strip(), m.group(2).strip()
-                else:
-                    authors = clean
-            entries.append({'key': key, 'num': num, 'label': _latex_clean(label or ''),
-                            'url': _entry_url(raw),
-                            'authors': authors, 'year': year,
-                            'plain': _tex_plain(raw)})
-        # natbib author-year styles emit \bibitem[Author(Year)]{key};
-        # numeric styles leave the optional label out
-        style = ('authoryear'
-                 if any('(' in e['label'] for e in entries) else 'numeric')
-        return {'available': bool(entries), 'style': style, 'entries': entries}
+        if bbl is not None:
+            entries = []
+            for num, (key, label, raw) in enumerate(
+                    _parse_bbl(bbl.read_text(encoding='utf-8', errors='replace')), 1):
+                authors = year = ''
+                if label:
+                    clean = _latex_clean(label)
+                    m = re.match(r'^(.*?)\(([^()]*)\)', clean)
+                    if m:
+                        authors, year = m.group(1).strip(), m.group(2).strip()
+                    else:
+                        authors = clean
+                # join the .bib metadata (title/journal/url) onto the bbl
+                # entry so hover popups are rich even in numeric styles
+                extra = next((e for e in bib_entries if e['key'] == key), None)
+                entries.append({'key': key, 'num': num, 'label': _latex_clean(label or ''),
+                                'url': _entry_url(raw) or (extra and extra.get('url')),
+                                'authors': authors or (extra and extra.get('authors')) or '',
+                                'year': year or (extra and extra.get('year')) or '',
+                                'plain': _tex_plain(raw)})
+            # natbib author-year styles emit \bibitem[Author(Year)]{key};
+            # numeric styles leave the optional label out
+            style = ('authoryear'
+                     if any('(' in e['label'] for e in entries) else 'numeric')
+            # keys known from .bib but not yet cited (no \bibitem) still
+            # autocomplete; they carry no num, so numeric-style rendering
+            # falls back to the raw chip for them
+            known = {e['key'] for e in entries}
+            entries.extend(e for e in bib_entries if e['key'] not in known)
+            return {'available': bool(entries), 'style': style,
+                    'entries': entries, 'source': 'bbl'}
+        # no .bbl yet (or stale) — serve the .bib files directly; the
+        # frontend renders these as chips only (no resolved numbering)
+        style = 'authoryear' if bib_entries else 'numeric'
+        return {'available': bool(bib_entries), 'style': style,
+                'entries': bib_entries, 'source': 'bib'}
+
+    @app.get('/api/project/{pid}/bibliography')
+    def bibliography_route(pid: str):
+        return _bib_payload(get_project(pid))
 
     # -- project images (\includegraphics) ---------------------------------------
     @app.get('/files/{pid}/{rel:path}')
