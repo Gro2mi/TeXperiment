@@ -10,8 +10,8 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -723,8 +723,10 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         proj = get_project(pid)
         _run(gitops.discard, proj.store.root, body.paths)
         # the worktree changed underneath us — re-parse and push a reload
+        # ('self': an editor op, not an external disk change)
         proj.store.rebuild()
-        broadcast({'type': 'reload', 'project': proj.id, 'doc': proj.store.doc})
+        broadcast({'type': 'reload', 'project': proj.id,
+                   'doc': proj.store.doc, 'self': True})
         return {'ok': True, 'status': _git_status_payload(proj)}
 
     @app.post('/api/project/{pid}/git/commit')
@@ -805,8 +807,11 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         label = _run(op, proj.store)
         if label is None:
             return {'ok': False, 'noop': True, **_history_flags(proj)}
-        # files changed on disk — push a reload like the git discard route
-        broadcast({'type': 'reload', 'project': proj.id, 'doc': proj.store.doc})
+        # files changed on disk — push a reload like the git discard route.
+        # 'self' marks an editor-made change: clients must not flag the
+        # reverted blocks as external disk changes (yellow)
+        broadcast({'type': 'reload', 'project': proj.id,
+                   'doc': proj.store.doc, 'self': True})
         return {'ok': True, 'label': label, 'doc': proj.store.doc,
                 **_history_flags(proj)}
 
@@ -974,14 +979,98 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
 
     # -- project images (\includegraphics) ---------------------------------------
     @app.get('/files/{pid}/{rel:path}')
-    def project_file(pid: str, rel: str):
+    def project_file(pid: str, rel: str, request: Request):
         store = get_project(pid).store
         p = (store.root / rel).resolve()
         if store.root not in p.parents and p != store.root:
             raise HTTPException(404)
         if not p.is_file():
             raise HTTPException(404)
-        return FileResponse(p)
+        # etag from mtime+size: re-renders remount the figure element, and
+        # without a validator the browser re-downloads the whole file every
+        # time (visible as the PDF viewer loading twice). max-age keeps
+        # plain plugin remounts from hitting the server at all; the etag
+        # bounds staleness at a minute for externally edited graphics
+        st = p.stat()
+        etag = f'"g{st.st_mtime_ns}-{st.st_size}"'
+        headers = {'ETag': etag,
+                   'Cache-Control': 'private, max-age=60, must-revalidate'}
+        if request.headers.get('if-none-match', '').strip() == etag:
+            return Response(status_code=304, headers=headers)
+        return FileResponse(p, headers=headers)
+
+    IMG_EXTS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp')
+    # LaTeX also happily includes vector formats the browser can't show in
+    # an <img> — resolve them too, the frontend decides how to display
+    GRAPHICS_EXTS = IMG_EXTS + ('.pdf', '.eps')
+
+    def _graphicspath_dirs(proj):
+        """Dirs declared via \\graphicspath{{dir/}{dir2/}} in the document."""
+        out = []
+        for b in proj.store.doc['blocks']:
+            for m in re.finditer(r'\\graphicspath\{((?:\s*\{[^{}]*\})+)\}',
+                                 b['source']):
+                for d in re.finditer(r'\{([^{}]*)\}', m.group(1)):
+                    d2 = d.group(1).strip().replace('\\', '/')
+                    if d2 and not d2.endswith('/'):
+                        d2 += '/'
+                    if d2:
+                        out.append(d2)
+        return out
+
+    def _resolve_graphic(proj, raw):
+        """Find the actual file for an \\includegraphics argument, the way
+        LaTeX does: literal path, then extension probing, then
+        \\graphicspath dirs, then a bounded basename search."""
+        p = raw.strip().strip('"{}').replace('\\', '/')
+        if not p:
+            return None
+        root = proj.store.root
+        stem = p.rsplit('.', 1)[0].lower() \
+            if '.' in p.rsplit('/', 1)[-1] else p.lower()
+        has_ext = stem != p.lower()
+        bases = [p] if has_ext else [p + e for e in GRAPHICS_EXTS]
+        dirs = [''] + _graphicspath_dirs(proj)
+        for d in dirs:
+            for base in bases:
+                cand = (root / d / base).resolve()
+                if root not in cand.parents and cand != root:
+                    continue  # escapes the project
+                if cand.is_file():
+                    return cand.relative_to(root).as_posix()
+        # last resort: same basename anywhere in the project (skips dot dirs)
+        want = p.rsplit('/', 1)[-1].lower()
+        for cand in root.rglob('*'):
+            parts = cand.relative_to(root).parts
+            if any(x.startswith('.') for x in parts):
+                continue
+            if not cand.is_file() or cand.suffix.lower() not in GRAPHICS_EXTS:
+                continue
+            if cand.name.lower() == want or \
+                    (not has_ext and cand.stem.lower() == want):
+                return cand.relative_to(root).as_posix()
+        return None
+
+    @app.get('/api/project/{pid}/graphic')
+    def graphic_route(pid: str, path: str):
+        rel = _resolve_graphic(get_project(pid), path)
+        if rel is None:
+            raise HTTPException(404, 'graphic not found')
+        return {'path': rel}
+
+    @app.get('/api/project/{pid}/graphics')
+    def graphics_route(pid: str):
+        """All graphics files in the project (raster + pdf/eps) for the
+        \\includegraphics autocomplete."""
+        root = get_project(pid).store.root
+        out = []
+        for cand in sorted(root.rglob('*')):
+            parts = cand.relative_to(root).parts
+            if any(x.startswith('.') for x in parts):
+                continue
+            if cand.is_file() and cand.suffix.lower() in GRAPHICS_EXTS:
+                out.append(cand.relative_to(root).as_posix())
+        return {'files': out}
 
     @app.websocket('/ws')
     async def ws_endpoint(ws: WebSocket):

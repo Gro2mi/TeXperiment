@@ -31,6 +31,9 @@ const state = {
   },
   history: {can_undo: false, can_redo: false}, // server-side undo/redo flags
   bib: null,         // parsed .bbl: {style, entries} — null = not loaded
+  graphics: [],      // project graphics files for \includegraphics autocomplete
+  graphicCache: new Map(), // \includegraphics arg → resolved rel path or null
+  graphicPending: new Map(), // \includegraphics arg → in-flight resolve promise
   gitDiff: {diffs: {}, ghosts: []}, // word-level diffs vs git HEAD
 };
 
@@ -1046,6 +1049,89 @@ function figureParts(src) {
   return {path: ig ? ig[1].trim() : null, caption};
 }
 
+// ---- figure media: resolve \includegraphics paths before fetching ----
+// raster args load directly (single request); extensionless / pdf / eps
+// args resolve via the server first, so the file itself downloads once
+
+const RASTER_RE = /\.(png|jpe?g|gif|webp|svg|bmp)$/i;
+
+function figureResolvedHtml(path, rel, key) {
+  const src = `/files/${state.project}/${encodeURI(rel)}`;
+  const figkey = ` data-figkey="${esc(key)}"`;
+  if (/\.pdf$/i.test(rel)) {
+    return `<embed class="figimg figpdf"${figkey} type="application/pdf" src="${src}" ` +
+      `title="${esc(path)} → ${esc(rel)}">`;
+  }
+  if (/\.eps$/i.test(rel)) {
+    return `<div class="figerr">${esc(path)} → ${esc(rel)} — EPS renders in ` +
+      `the compiled PDF but has no browser preview.</div>`;
+  }
+  return `<img class="figimg"${figkey} src="${src}" data-orig="${esc(path)}" alt="figure">`;
+}
+
+function figureMediaHtml(path, key) {
+  const cached = state.graphicCache.get(path);
+  if (state.graphicCache.has(path)) {
+    return cached ? figureResolvedHtml(path, cached, key)
+      : `<div class="figerr">${esc(path)} — no matching graphics file found.</div>`;
+  }
+  // raster args are their own best guess: load directly; the error
+  // fallback below resolves if the literal path turns out wrong
+  if (RASTER_RE.test(path)) {
+    return `<img class="figimg" data-figkey="${esc(key)}" ` +
+      `src="/files/${state.project}/${encodeURI(path)}" ` +
+      `data-orig="${esc(path)}" alt="figure">`;
+  }
+  // resolve BEFORE touching the file — a doomed <img> attempt would fetch
+  // it twice (once as a failed image, once for the real embed)
+  resolveGraphic(path).then(rel => {
+    document.querySelectorAll(
+      `.figimg.figpend[data-figpath="${CSS.escape(path)}"]`).forEach(ph => {
+      ph.outerHTML = rel ? figureResolvedHtml(path, rel, ph.dataset.figkeyPending)
+        : `<div class="figerr">${esc(path)} — no matching graphics file found.</div>`;
+    });
+  });
+  return `<div class="figimg figpend" data-figpath="${esc(path)}" ` +
+    `data-figkey-pending="${esc(key)}">resolving…</div>`;
+}
+
+function resolveGraphic(path) {
+  if (state.graphicCache.has(path)) {
+    return Promise.resolve(state.graphicCache.get(path));
+  }
+  if (state.graphicPending.has(path)) return state.graphicPending.get(path);
+  const p = papi('/graphic?path=' + encodeURIComponent(path))
+    .then(r => {
+      state.graphicCache.set(path, r.path);
+      state.graphicPending.delete(path);
+      return r.path;
+    })
+    .catch(() => {
+      state.graphicCache.set(path, null);
+      state.graphicPending.delete(path);
+      return null;
+    });
+  state.graphicPending.set(path, p);
+  return p;
+}
+
+// figure media nodes survive re-renders: an <embed> that is moved (not
+// recreated) keeps its loaded document — pdf.js never reloads. Keyed by
+// block id + includegraphics path, so a genuinely changed figure (path
+// edited) still remounts with the new source
+function harvestFigureMedia(root) {
+  const map = new Map();
+  root.querySelectorAll('[data-figkey]').forEach(n => map.set(n.dataset.figkey, n));
+  return map;
+}
+
+function transplantFigureMedia(newRoot, live) {
+  newRoot.querySelectorAll('[data-figkey]').forEach(n => {
+    const old = live.get(n.dataset.figkey);
+    if (old) n.replaceWith(old);
+  });
+}
+
 function stripCommentDecorations(s) {
   // drop lines that hold nothing but % and - = . decorations (dotted/dashed
   // rules); the remaining lines keep their text, decoration runs stripped
@@ -1174,8 +1260,7 @@ function renderBlockContent(b) {
     case 'figure': {
       const {path, caption} = figureParts(b.source);
       if (!path) return `<div class="figerr">${esc(b.source)}</div>`;
-      const img = `<img class="figimg" src="/files/${state.project}/${encodeURI(path)}" ` +
-        `data-orig="${esc(path)}" alt="figure">`;
+      const img = figureMediaHtml(path, b.id + '\u0000' + path);
       const cOff = caption ? b.source.indexOf(caption) : -1;
       const cMarks = cOff >= 0 ? shiftMarks(proofMarksFor(b), cOff, caption.length) : [];
       const cGit = cOff >= 0 ? shiftGit(gitMarksFor(b), cOff, caption.length) : null;
@@ -1384,6 +1469,10 @@ function toggleCollapse(b) {
 function renderContent() {
   closeOrphanAutocomplete(); // rebuilt editors leave no blur behind
   const c = $('#content');
+  // figure <embed>s are moved into the new DOM, not recreated — moving
+  // keeps the loaded document, so pdf.js never reloads on a re-render
+  const oldDoc = c.querySelector('.doc');
+  const liveFigures = oldDoc ? harvestFigureMedia(oldDoc) : null;
   c.innerHTML = '';
   if (!state.doc) {
     c.append(el('div', 'emptystate',
@@ -1451,6 +1540,7 @@ function renderContent() {
   }
   for (const ge of (flushGhosts(null) || [])) docEl.append(ge);
   if (pending.length) pending.forEach(g => docEl.append(ghostEl(g))); // anchors hidden
+  if (liveFigures && liveFigures.size) transplantFigureMedia(docEl, liveFigures);
   c.append(docEl);
 }
 
@@ -1797,6 +1887,8 @@ function rerenderBlock(b) {
   const old = $(`.block[data-id="${b.id}"]`);
   if (!old) return;
   const fresh = blockEl(b);
+  const liveFigures = harvestFigureMedia(old);
+  if (liveFigures.size) transplantFigureMedia(fresh, liveFigures);
   if (old.classList.contains('stale')) fresh.classList.add('stale');
   old.replaceWith(fresh);
 }
@@ -2098,6 +2190,10 @@ function acContext(ta) {
       const typed = partial.slice(partial.lastIndexOf(',') + 1).trimStart();
       if (AC_CITE_RE.test(cmd)) return {kind: 'cite', typed};
       if (AC_REF_RE.test(cmd)) return {kind: 'ref', typed};
+      // image files inside \includegraphics[..]{ — LaTeX graphics rules
+      if (/\\includegraphics\*?(?:\[[^\]]*\])?$/.test(cmd)) {
+        return {kind: 'graphic', typed};
+      }
       // unit positions: second brace of \SI{val}{ and the brace of \si{val}
       if (/\\SI\{[^{}]*\}$/.test(cmd) || /\\si$/.test(cmd)) {
         return {kind: 'unit', typed};
@@ -2258,6 +2354,11 @@ function acSuggestions(kind, typed) {
       items = [...used].filter(Boolean)
         .map(k => ({insert: k, title: k, sub: 'already cited in document'}));
     }
+  } else if (kind === 'graphic') {
+    items = (state.graphics || []).map(f => {
+      const ix = f.lastIndexOf('/');
+      return {insert: f, title: f.slice(ix + 1), sub: f.slice(0, ix) || 'project root'};
+    });
   } else {
     const typeNames = {math: 'equation', figure: 'figure', table: 'table'};
     const seen = new Set();
@@ -2275,7 +2376,8 @@ function acSuggestions(kind, typed) {
       }
     }
   }
-  return items.filter(i => i.title.toLowerCase().includes(t)).slice(0, 12);
+  return items.filter(i => i.title.toLowerCase().includes(t) ||
+      i.insert.toLowerCase().includes(t)).slice(0, 12);
 }
 
 // live autocomplete popups → their textareas; a popup whose editor left the
@@ -2389,6 +2491,8 @@ function attachAutocomplete(ta) {
       sel = (sel + d + items.length) % items.length;
       render();
     } else if (e.key === 'Enter' || e.key === 'Tab') {
+      // Ctrl/Cmd+Enter keeps its meaning (save) even with the popup open
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) return;
       e.preventDefault();
       e.stopPropagation();
       choose(sel);
@@ -3067,7 +3171,7 @@ const TEMPLATES = [
   ['Itemized list', '\\begin{itemize}\n  \\item First point\n  \\item Second point\n\\end{itemize}'],
   ['Table', '\\begin{tabular}{ll}\nAlpha & Beta \\\\\nGamma & Delta\n\\end{tabular}'],
   ['Section', '\\section{New section}'],
-  ['Figure', '\\begin{figure}\n  \\centering\n  \\includegraphics{figures/plot.png}\n  \\caption{A caption.}\n\\end{figure}'],
+  ['Figure', '\\begin{figure}\n  \\centering\n  \\includegraphics{|}\n  \\caption{}\n\\end{figure}'],
 ];
 
 function showInsertMenu(b, ev) {
@@ -3078,8 +3182,12 @@ function showInsertMenu(b, ev) {
     const btn = el('button', '', label);
     btn.onclick = async () => {
       closeInsertMenu();
+      // '|' marks where the caret should land after insertion (stripped
+      // before writing the skeleton to disk)
+      const caret = tmpl.indexOf('|');
+      const src = caret >= 0 ? tmpl.replace('|', '') : tmpl;
       try {
-        const res = await ppost('/block/insert', {after: b.id, source: tmpl});
+        const res = await ppost('/block/insert', {after: b.id, source: src});
         applyDoc(res.doc);
         if (res.new_id) {
           const nb = blockById(res.new_id);
@@ -3087,8 +3195,21 @@ function showInsertMenu(b, ev) {
             scrollToBlock(nb.id);
             setTimeout(() => {
               scrollToBlock(nb.id);
-              openEditor(nb, {fresh: true,
-                ph: 'Write your ' + label.toLowerCase() + ' here…'});
+              // pre-filled templates (Figure) get the skeleton as real
+              // text with the caret on the filename and the image list
+              // already open; everything else stays placeholder-hinted
+              if (caret >= 0) {
+                openEditor(nb);
+                const ta = $(`.block[data-id="${nb.id}"] .editor textarea`);
+                if (ta) {
+                  ta.setSelectionRange(caret, caret);
+                  ta.dispatchEvent(new Event('input', {bubbles: true}));
+                  ta.focus();
+                }
+              } else {
+                openEditor(nb, {fresh: true,
+                  ph: 'Write your ' + label.toLowerCase() + ' here…'});
+              }
             }, 60);
           }
         }
@@ -4622,6 +4743,16 @@ async function refreshDoc() {
   if (!state.project) { renderAll(); return; }
   try { applyDoc(await papi('/doc')); }
   catch (e) { toast('Cannot load document: ' + e.message, true); }
+  loadGraphics();
+}
+
+// image files available for \includegraphics autocomplete (raster + pdf/eps)
+async function loadGraphics() {
+  if (!state.project) { state.graphics = []; return; }
+  try {
+    const res = await papi('/graphics');
+    state.graphics = res.files || [];
+  } catch (e) { state.graphics = []; }
 }
 
 function connectWS() {
@@ -4652,7 +4783,11 @@ function connectWS() {
   };
   ws.onmessage = ev => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === 'reload' && msg.project === state.project) applyDoc(msg.doc, true);
+    if (msg.type === 'reload' && msg.project === state.project) {
+      // 'self' = the change came from an editor op (undo/redo/discard),
+      // not from something editing files behind our back — don't flag
+      applyDoc(msg.doc, msg.self !== true);
+    }
     if (msg.type === 'bib' && msg.project === state.project) refreshBib();
   };
 }
@@ -4796,5 +4931,21 @@ connectWS();
     sbsbtn.classList.toggle('toggled', state.sbs);
     renderContentPreservingScroll();
   });
+  // raster figures whose literal path 404s (file moved, graphicspath use)
+  // resolve via the server and swap the src; pdf/eps figures never get a
+  // doomed src (figureMediaHtml resolves first), so nothing to do here
+  document.addEventListener('error', ev => {
+    const img = ev.target;
+    if (!(img instanceof HTMLImageElement) ||
+        !img.classList.contains('figimg') || img.dataset.resolving) return;
+    const orig = img.dataset.orig;
+    if (!orig) return;
+    img.dataset.resolving = '1';
+    resolveGraphic(orig).then(rel => {
+      if (rel && !/\.pdf$/i.test(rel) && !/\.eps$/i.test(rel)) {
+        img.src = `/files/${state.project}/${encodeURI(rel)}`;
+      }
+    });
+  }, true);
   syncHistoryButtons();
 })();
