@@ -173,7 +173,7 @@ body {
 }
 .b-enddoc { opacity: .6; }
 .block.b-hidden, .block.b-collapsed { display: none; }
-.insertline.b-collapsed, .sbsrow.b-collapsed { display: none; }
+.insertline.b-collapsed, .block.b-collapsed { display: none; }
 h1.blk, h2.blk, h3.blk, h4.blk { position: relative; }
 .collapsebtn {
   position: absolute; left: -34px; top: 50%; transform: translateY(-50%);
@@ -896,32 +896,36 @@ tr.rulegap td:hover .ruleadd { display: inline; }
   max-width: min(1680px, 100%);
   padding: 40px 36px;
 }
+/* one grid row per block: the browser aligns both cells — segments can
+   never drift or overlap, and a taller raw side just grows the row */
 .sbsrow {
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 2px 18px; align-items: start;
+  gap: 0 18px; align-items: start;
 }
-.sbsrow .block { margin: 2px 0; }
-.sbsraw {
-  min-width: 0; margin: 2px 0;
+.sbsrow.b-collapsed { display: none; }
+.sbsfileseg {
+  min-width: 0; position: relative;
   font-family: var(--mono); font-size: var(--doc-size, 17px); line-height: 1.5;
-  background: var(--soft-bg); border: 1px solid var(--panel-line);
-  border-radius: 6px; padding: 5px 9px;
+  background: var(--soft-bg);
+  padding: 4px 12px; outline: none;
+  white-space: pre-wrap; word-break: break-word;
+  color: var(--panel-ink); caret-color: var(--accent);
 }
-.sbsraw .rawsrc {
-  white-space: pre-wrap; word-break: break-word; color: var(--panel-ink);
-  cursor: text; min-height: 14px;
+.sbsfileseg[data-first='1'] {
+  margin-top: 16px; padding-top: 24px; border-radius: 6px 6px 0 0;
 }
-.sbsraw.ro .rawsrc { color: var(--muted); cursor: default; }
-.sbsraw.editing { border-color: var(--accent); background: var(--panel); }
-.sbsrawbar { display: flex; gap: 6px; align-items: center; margin: 2px 0 6px; }
-.sbsrawbar .spacer { flex: 1; }
-.sbsraw textarea {
-  width: 100%; box-sizing: border-box;
-  font-family: var(--mono); font-size: inherit; line-height: 1.5;
-  border: 1px solid var(--panel-line); border-radius: 4px; padding: 6px 8px;
-  background: var(--panel); color: var(--panel-ink); resize: vertical;
+.sbsfileseg[data-last='1'] {
+  border-radius: 0 0 6px 6px; padding-bottom: 12px;
 }
-.sbsraw textarea:focus { outline: 1px solid var(--accent); }
+.sbsfileseg[data-first='1'][data-last='1'] { border-radius: 6px; }
+.sbsfileseg[data-first='1']::before {
+  content: attr(data-file);
+  position: absolute; top: 5px; right: 12px;
+  font-size: 9.5px; letter-spacing: .08em; color: var(--muted);
+  pointer-events: none;
+}
+.sbsfileseg:focus { background: var(--panel); }
+.sbsfileseg:focus[data-first='1']::before { color: var(--accent); }
 .figpdf {
   width: 100%; height: 340px; background: #fff;
   border: 1px solid var(--panel-line); border-radius: 4px;
@@ -931,3 +935,43 @@ tr.rulegap td:hover .ruleadd { display: inline; }
   min-height: 80px; color: var(--muted); font-size: 12.5px;
   border: 1px dashed var(--panel-line); background: var(--soft-bg);
 }
+/* inline editing (side-by-side rendered column): the textarea carries the
+   source but is styled exactly like the rendered text so position and
+   look don't jump — only the block gets the editing highlight */
+.inline-ta {
+  display: block; width: 100%; box-sizing: border-box;
+  font-family: var(--serif); font-size: var(--doc-size, 17px);
+  line-height: 1.65; color: var(--panel-ink); background: transparent;
+  border: none; outline: none; resize: none; overflow: hidden;
+  padding: 0; margin: 0; caret-color: var(--accent);
+}
+/* outline drag & drop: whole (sub)section moves */
+.oitem[draggable='true'] { cursor: grab; }
+.oitem.dragging { opacity: .45; }
+.oitem.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.oitem.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+/* inline editing (side-by-side rendered column): contenteditable over
+   rendered tokens; only the active command shows its raw source */
+.inline-ce {
+  display: block; width: 100%; box-sizing: border-box;
+  font-family: var(--serif); font-size: var(--doc-size, 17px);
+  line-height: 1.65; color: var(--panel-ink); background: transparent;
+  border: none; outline: none; padding: 0; margin: 0;
+  caret-color: var(--accent); white-space: pre-wrap;
+}
+.inline-ce .tok-atomic { border-radius: 3px; }
+.inline-ce .tok-raw {
+  background: rgba(59, 130, 246, .1);
+  border-radius: 3px; box-shadow: 0 0 0 1px rgba(59, 130, 246, .25);
+}
+/* \paragraph / \subparagraph run-in headings: LaTeX puts vertical space
+   before them — break onto their own line, then run the text in */
+.runin { display: block; margin-top: .9em; }
+.inline-ce .runin, .tok-atomic .runin { display: inline-block; width: 100%; }
+/* side-by-side left cell: block + hover add-block bar above it */
+.sbsl { position: relative; min-width: 0; }
+.sbsl .insertline {
+  position: absolute; top: -9px; left: 0; right: 0; z-index: 5;
+  margin: 0; height: 16px; opacity: 0; pointer-events: none;
+}
+.sbsl:hover .insertline { opacity: 1; pointer-events: auto; }

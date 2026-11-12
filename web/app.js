@@ -11,7 +11,8 @@ const state = {
   doc: null,
   ws: null,
   edit: null,        // {id, kind, original, root, block}
-  rawEdit: null,     // side-by-side raw cell being edited {id, block, original, ta}
+  sbsFiles: new Map(), // side-by-side per-file editors {path → {ec, wrap, ...}}
+  inlineEdit: null,  // in-place rendered-column editor {id, block, original, ta}
   sbs: localStorage.getItem('sbs') === '1', // side-by-side mode (persisted)
   docSize: parseFloat(localStorage.getItem('doc-size')) || 17, // document font size
   browsePath: null,  // disk browser location
@@ -391,6 +392,8 @@ function renderCitation(cmd, opts, keys) {
   return wrap(html);
 }
 
+let _renderRec = null;  // array: record source-token → html map while rendering
+
 function renderInline(src, marks, git) {
   marks = marks || [];
   const adds = git && git.adds ? git.adds : [];
@@ -409,7 +412,17 @@ function renderInline(src, marks, git) {
   let out = '';
   let i = 0;
   const n = src.length;
+  // when a source→html map is requested, slice out each consumed token's
+  // html (nested renderInline calls — e.g. footnotes — never record)
+  const rec = _renderRec;
+  _renderRec = null;
+  let tokS = i, tokR = 0;
   while (i < n) {
+    if (rec) {
+      rec.push({s0: tokS, s1: i, html: out.slice(tokR)});
+      tokS = i;
+      tokR = out.length;
+    }
     // new text first: a green add-run at this position renders before
     // the crossed-out old text that follows it
         // wrap runs inside a git add-range in green
@@ -476,6 +489,13 @@ function renderInline(src, marks, git) {
           i = g.end;
           continue;
         }
+        // unclosed brace group (command still being typed): the whole
+        // rest is one atomic token so the inline editor can flip it raw
+        if (src[j] === '{') {
+          out += `<span class="cmdchip">${esc(src.slice(i, n))}</span>`;
+          i = n;
+          continue;
+        }
       }
       if (cmd === 'textcolor' || cmd === 'color') {
         const g1 = readGroup(src, after);
@@ -505,7 +525,7 @@ function renderInline(src, marks, git) {
             i = g.end;
             continue;
           } else if (cmd === 'cite') {
-            out += `<span class="citechip">cite:${esc(g.body)}</span>`;
+            out += `${lineStart ? '<br>' : ''}<span class="citechip">cite:${esc(g.body)}</span>`;
           } else if (cmd === 'label') {
             out += `<span class="chip">label:${esc(g.body)}</span>`;
           } else if (cmd === 'url') {
@@ -533,11 +553,13 @@ function renderInline(src, marks, git) {
         if (g && ['vspace', 'hspace'].includes(cmd)) i = g.end;
         continue;
       }
+      const lineStart = i === 0 || src[i - 1] === '\n';
       if (RUNIN_CMDS.has(cmd)) {
-        // \paragraph{Title.} → bold run-in heading followed by the text
+        // \paragraph{Title.} → bold run-in heading; LaTeX puts vertical
+        // space before it, so the title breaks onto its own line
         const g = readGroup(src, after);
         if (g) {
-          out += `<strong>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</strong> `;
+          out += `<span class="runin"><strong>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</strong> </span>`;
           i = g.end;
           continue;
         }
@@ -580,10 +602,14 @@ function renderInline(src, marks, git) {
         if (src[j] === '{') {
           const g = readGroup(src, j);
           if (g) { parts.push(`{${g.body}}`); j = g.end; continue; }
+          // unclosed group: everything typed so far is part of this chip
+          parts.push(src.slice(j, n));
+          j = n;
+          continue;
         }
         break;
       }
-      out += `<span class="cmdchip">\\${esc(cmd)}${esc(parts.join(''))}</span>`;
+      out += `${lineStart ? '<br>' : ''}<span class="cmdchip">\\${esc(cmd)}${esc(parts.join(''))}</span>`;
       i = j;
     } else if (c === '$') {
       if (src[i + 1] === '$') { i += 2; continue; } // display math is block-level
@@ -619,6 +645,10 @@ function renderInline(src, marks, git) {
     }
   }
     flushDels(); // trailing deletions after an add that reached the end
+  if (rec) {
+    rec.push({s0: tokS, s1: n, html: out.slice(tokR)});
+    _renderRec = rec;
+  }
   return out;
 }
 
@@ -1388,6 +1418,56 @@ function renderSidebar() {
       : '<span class="ochev noleaf"></span>';
     item.innerHTML = chev + (num ? num + '&nbsp;&nbsp;' : '') +
       renderInline(e.b.meta.title || '(untitled)');
+    if (e.b.type === 'section') {
+      item.draggable = true;
+      item.title = 'Drag to move the whole section';
+      item.addEventListener('dragstart', ev => {
+        _outlineDrag = e.b;
+        ev.dataTransfer.setData('text/plain', e.b.id);
+        ev.dataTransfer.effectAllowed = 'move';
+        item.classList.add('dragging');
+      });
+      item.addEventListener('dragend', () => {
+        _outlineDrag = null;
+        item.classList.remove('dragging');
+        document.querySelectorAll('#outline .oitem')
+          .forEach(o => o.classList.remove('drop-before', 'drop-after'));
+      });
+      item.addEventListener('dragover', ev => {
+        const d = _outlineDrag;
+        // legal targets: same file, same or higher level (the move op
+        // swaps a section chunk past same-or-higher-level headings)
+        if (!d || d.id === e.b.id || d.file !== e.b.file) return;
+        if (((e.b.meta || {}).level || 2) > ((d.meta || {}).level || 2)) return;
+        ev.preventDefault();
+        ev.dataTransfer.dropEffect = 'move';
+        document.querySelectorAll('#outline .oitem')
+          .forEach(o => o.classList.remove('drop-before', 'drop-after'));
+        const r2 = item.getBoundingClientRect();
+        item.classList.add(
+          (ev.clientY - r2.top) < r2.height / 2 ? 'drop-before' : 'drop-after');
+      });
+      item.addEventListener('drop', ev => {
+        ev.preventDefault();
+        const d = _outlineDrag;
+        document.querySelectorAll('#outline .oitem')
+          .forEach(o => o.classList.remove('drop-before', 'drop-after'));
+        if (!d || d.id === e.b.id) return;
+        if (d.file !== e.b.file) {
+          toast("Sections can't move between files", true);
+          return;
+        }
+        if (((e.b.meta || {}).level || 2) > ((d.meta || {}).level || 2)) return;
+        const r2 = item.getBoundingClientRect();
+        const before = (ev.clientY - r2.top) < r2.height / 2;
+        const mv = outlineMoveParams(d, e.b, before);
+        if (!mv) return; // already at that spot
+        ppost(`/block/${d.id}/move`, mv).then(res => {
+          applyDoc(res.doc);
+          toast('Section moved');
+        }).catch(err => toast('Move failed: ' + err.message, true));
+      });
+    }
     item.onclick = ev => {
       const chevEl = ev.target.closest('.ochev');
       if (chevEl && !chevEl.classList.contains('noleaf')) {
@@ -1403,6 +1483,32 @@ function renderSidebar() {
   }
   updateOutlineCurrent();
   applyOutlineGitMarks();
+}
+
+let _outlineDrag = null; // outline item currently being dragged (block obj)
+
+// translate "drop section x before/after section z" into the move op's
+// direction + positions: the op swaps a section chunk past same-or-higher
+// level headings, so k such headings up/down define the landing spot
+function outlineMoveParams(x, z, before) {
+  const secs = state.doc.blocks.filter(b2 => b2.type === 'section' &&
+    b2.file === x.file);
+  const L = (x.meta || {}).level || 2;
+  const rel = t2 => ((t2.meta || {}).level || 2) <= L;
+  const ix = secs.indexOf(x), iz = secs.indexOf(z);
+  if (ix < 0 || iz < 0) return null;
+  const above = secs.slice(0, ix).filter(rel);
+  const below = secs.slice(ix + 1).filter(rel);
+  if (iz < ix) {
+    // up-move lands before the p-th nearest relevant heading above —
+    // count from z (inclusive) up to x
+    const p = above.length - above.indexOf(z);
+    if (!before) return p === 1 ? null : {direction: 'up', positions: p - 1};
+    return {direction: 'up', positions: p};
+  }
+  const m = below.indexOf(z);     // z is the (m+1)-th relevant heading below
+  if (before) return m === 0 ? null : {direction: 'down', positions: m};
+  return {direction: 'down', positions: m + 1};
 }
 
 // highlight the outline entry for the section currently on screen
@@ -1502,6 +1608,9 @@ function renderContent() {
   const hiddenIds = computeCollapsedIds(blocks);
   // side-by-side: the sheet doubles in width — two document columns
   const docEl = el('div', 'doc' + (state.sbs ? ' sbs' : ''));
+  // in sbs mode the tracked raw files' texts and caret move across the
+  // re-render (the segments themselves are rebuilt)
+  const rawKeep = state.sbs ? harvestRawKeep() : null;
   // git ghost rows: blocks removed since HEAD (only with highlighting on)
   const ghosts = (state.gitHl && state.git && state.git.repo
     && state.gitDiff && state.gitDiff.ghosts) ? state.gitDiff.ghosts : [];
@@ -1519,12 +1628,19 @@ function renderContent() {
     const b = blocks[i];
     const h = hiddenIds.has(b.id);
     if (state.sbs) {
-      // one row per block: rendered left, raw source right — tops aligned
+      // one grid row per block: rendered left, raw right — the browser
+      // aligns the cells, so the raw text can never drift or overlap
+      const firstOfFile = i === 0 || blocks[i - 1].file !== b.file;
+      const lastOfFile = i + 1 >= blocks.length ||
+        blocks[i + 1].file !== b.file;
       const row = el('div', 'sbsrow' +
         (h || isBlankComment(b) ? ' b-collapsed' : ''));
-      row.append(blockEl(b));
-      row.append(rawCell(b));
+      // left cell: the block plus a hover add-block bar above it
+      const left = el('div', 'sbsl');
+      left.append(insertLine(b, h || isBlankComment(b)), blockEl(b));
+      row.append(left, rawSeg(b, firstOfFile, lastOfFile));
       docEl.append(row);
+      if (state.sbs) continue;
     } else {
       docEl.append(blockEl(b, h));
     }
@@ -1535,9 +1651,10 @@ function renderContent() {
       const headingLabel = b.type === 'section' && next &&
         next.source.trimStart().startsWith('\\label{');
       const nextH = i + 1 < blocks.length ? hiddenIds.has(blocks[i + 1].id) : h;
-      if (!headingLabel) docEl.append(insertLine(b, h || nextH));
+      if (!headingLabel && !state.sbs) docEl.append(insertLine(b, h || nextH));
     }
   }
+  if (state.sbs && rawKeep && rawKeep.length) restoreRawKeep(rawKeep);
   for (const ge of (flushGhosts(null) || [])) docEl.append(ge);
   if (pending.length) pending.forEach(g => docEl.append(ghostEl(g))); // anchors hidden
   if (liveFigures && liveFigures.size) transplantFigureMedia(docEl, liveFigures);
@@ -1553,118 +1670,978 @@ function insertLine(b, hidden = false) {
 }
 
 /* ------------------------------------------------------------------ */
-/* side-by-side mode: raw column with per-block source editing         */
+/* side-by-side raw column: one grid row per block — the browser aligns */
+/* both cells, so segments can never overlap or drift. Segments are    */
+/* borderless and flow continuously (one visual file), each editable   */
+/* as flat text; commit saves the WHOLE file.                          */
 /* ------------------------------------------------------------------ */
 
-function rawCell(b) {
-  const cell = el('div', 'sbsraw');
-  cell.dataset.id = b.id;
-  if (state.rawEdit && state.rawEdit.id === b.id) {
-    buildRawEditor(cell, b, state.rawEdit.ta.value);
-    return cell;
-  }
-  if (!EDITABLE.has(b.type)) {
-    cell.classList.add('ro');
-    cell.append(el('div', 'rawsrc', esc(b.source)));
-    return cell;
-  }
-  const src = el('div', 'rawsrc', esc(b.source));
-  src.title = 'Click to edit the raw source';
-  src.addEventListener('click', () => activateRawEditor(b));
-  cell.append(src);
-  return cell;
+// the whitespace between one block's end and the next block's start in
+// the same file — part of the segment text so the column reads like the
+// continuous file (block spans come from the server's parse)
+function sepAfterBlock(b) {
+  const NL = String.fromCharCode(10);
+  if (!state.doc) return NL + NL;
+  const blocks = state.doc.blocks;
+  const i = blocks.findIndex(x => x.id === b.id);
+  const next = blocks[i + 1];
+  if (!next || next.file !== b.file || next.start === undefined) return '';
+  const gap = Math.max(0, next.start - b.end);
+  return gap ? NL.repeat(gap) : '';
 }
 
-function stopRawEditListener() {
-  if (state._rawEscHandler) {
-    document.removeEventListener('keydown', state._rawEscHandler, true);
-    state._rawEscHandler = null;
+// one editable segment per block: its source + trailing separator
+function rawSeg(b, firstOfFile, lastOfFile) {
+  const seg = el('div', 'sbsfileseg');
+  seg.dataset.file = b.file;
+  seg.dataset.blockId = b.id;
+  if (firstOfFile) seg.dataset.first = '1';
+  if (lastOfFile) seg.dataset.last = '1';
+  seg.contentEditable = 'true';
+  seg.spellcheck = false;
+  seg.textContent = b.source + sepAfterBlock(b);
+  wireRawSeg(seg);
+  return seg;
+}
+
+function segsOfFile(path) {
+  return [...document.querySelectorAll(`.sbsfileseg[data-file="${CSS.escape(path)}"]`)];
+}
+
+function rawFileText(path) {
+  return segsOfFile(path).map(s => s.textContent).join('');
+}
+
+// the pristine file content as last saved (from the doc model)
+function rawFileOriginal(path) {
+  if (!state.doc) return '';
+  return state.doc.blocks
+    .filter(b => b.file === path)
+    .map(b => b.source + sepAfterBlock(b))
+    .join('');
+}
+
+function wireRawSeg(seg) {
+  attachRawAC(seg);
+  seg.addEventListener('input', () => {
+    // start tracking this file's edits (original = last saved content)
+    if (!state.sbsFiles.has(seg.dataset.file)) {
+      state.sbsFiles.set(seg.dataset.file,
+        {original: rawFileOriginal(seg.dataset.file)});
+    }
+    // live preview of this block on the rendered side
+    const bid = seg.dataset.blockId;
+    const b = state.doc && state.doc.blocks.find(x => x.id === bid);
+    const bel = document.querySelector(`.block[data-id="${bid}"]`);
+    if (b && bel && !bel.querySelector('.inline-ce') &&
+        !bel.querySelector('.editor')) {
+      const bc = bel.querySelector('.bcontent');
+      if (bc) bc.innerHTML = renderBlockContent({...b, source: seg.textContent});
+    }
+  });
+  seg.addEventListener('keydown', e => {
+    const popOpen = !!document.querySelector('.acpopup');
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelRawFile(seg.dataset.file);
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      commitRawFile(seg.dataset.file);
+    } else if (e.key === 'Enter' && !popOpen) {
+      // flat text: a newline is a literal \n character, never a <div>
+      e.preventDefault();
+      const s = getSelection();
+      if (!s.rangeCount) return;
+      const r = s.getRangeAt(0);
+      r.deleteContents();
+      r.insertNode(document.createTextNode(String.fromCharCode(10)));
+      s.collapseToEnd();
+      seg.dispatchEvent(new Event('input', {bubbles: true}));
+    }
+  });
+  seg.addEventListener('paste', e => {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, text);
+  });
+}
+
+function commitRawFile(path) {
+  return enqueueOp(async () => {
+    const ref = state.sbsFiles.get(path);
+    if (!ref) return;
+    const text = rawFileText(path);
+    state.sbsFiles.delete(path);
+    if (text === ref.original) return;
+    try {
+      const res = await papi(`/file`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path, source: text}),
+      });
+      applyDoc(res.doc);
+      toast('File saved');
+    } catch (e) {
+      toast('Save failed: ' + e.message, true);
+      rerenderContentPreservingScroll();
+    }
+  });
+}
+
+function cancelRawFile(path) {
+  if (!state.sbsFiles.has(path)) return;
+  state.sbsFiles.delete(path);
+  rerenderContentPreservingScroll();
+}
+
+// commit every edited file — toggling sbs off, opening another editor,
+// clicking outside the raw column
+function commitDirtyRawFiles(exceptPath) {
+  for (const path of [...state.sbsFiles.keys()]) {
+    if (path === exceptPath) continue;
+    if (rawFileText(path) !== state.sbsFiles.get(path).original) {
+      commitRawFile(path);
+    } else {
+      state.sbsFiles.delete(path);
+    }
   }
 }
 
-// turn the raw cell of block b into a live editor (optionally carrying
-// over in-progress text across background re-renders)
-function activateRawEditor(b, preset) {
-  if (state.edit) closeEditor();          // one active editor at a time
-  if (state.rawEdit) cancelRawEdit();     // and one raw cell
-  const cell = $(`.sbsraw[data-id="${b.id}"]`);
-  if (!cell) return;
-  cell.innerHTML = '';
-  buildRawEditor(cell, b, preset !== undefined ? preset : b.source);
+// keep-alive across re-renders: capture each tracked file's per-segment
+// texts and the caret, restore them into the rebuilt segments
+function harvestRawKeep() {
+  const keep = [];
+  for (const [path, ref] of state.sbsFiles) {
+    const segs = segsOfFile(path);
+    if (!segs.length) continue;
+    const texts = segs.map(s => s.textContent);
+    let caret = null;
+    const s = getSelection();
+    if (s.rangeCount && segs.some(sg => sg.contains(s.anchorNode))) {
+      const seg = segs.find(sg => sg.contains(s.anchorNode));
+      caret = {ix: segs.indexOf(seg),
+               off: bcTextOffset(seg, s.anchorNode, s.anchorOffset)};
+    }
+    keep.push({path, original: ref.original, texts, caret});
+  }
+  return keep;
 }
 
-function buildRawEditor(cell, b, value) {
-  stopRawEditListener();
-  cell.classList.add('editing');
-  const bar = el('div', 'sbsrawbar');
-  const saveBtn = el('button', 'edbtn primary', '✓ Save');
-  const cancelBtn = el('button', 'edbtn', 'Cancel');
-  bar.append(cancelBtn, el('span', 'spacer'), saveBtn);
-  bar.append(el('span', 'hint', 'Ctrl+Enter saves · Esc cancels'));
-  cell.append(bar);
-  const ta = el('textarea');
-  ta.value = value;
-  ta.rows = Math.min(Math.max(value.split('\n').length + 1, 4), 30);
-  ta.spellcheck = false;
-  attachAutoGrow(ta); // grow with the content, capped at 35% of the screen
-  attachAutocomplete(ta); // cite keys + \ref/\label targets + commands
-  cell.append(ta);
+function restoreRawKeep(keep) {
+  for (const k of keep) {
+    const segs = segsOfFile(k.path);
+    if (!segs.length) continue;
+    state.sbsFiles.set(k.path, {original: k.original});
+    segs.forEach((sg, ix) => { if (k.texts[ix] !== undefined) sg.textContent = k.texts[ix]; });
+    if (k.caret && segs[k.caret.ix]) {
+      const seg = segs[k.caret.ix];
+      cePlaceTextOffset({ec: seg}, k.caret.off);
+      seg.focus();
+    }
+  }
+}
 
-  const commit = async () => {
-    const src = reflowLongLines(ta.value);
-    if (src === state.rawEdit.original) { cancelRawEdit(); return; }
-    const ref = state.rawEdit;
-    state.rawEdit = null;
-    stopRawEditListener();
+/* ---- raw-side autocomplete (cite keys, ref targets, commands) over
+   a plain-text contenteditable segment ---- */
+
+function prefixContext(prefix) {
+  let kind = null, typed = '';
+  const brace = prefix.lastIndexOf('{');
+  if (brace >= 0) {
+    const cmd = prefix.slice(0, brace);
+    const partial = prefix.slice(brace + 1);
+    if (!/[{}]/.test(partial)) {
+      const t2 = partial.slice(partial.lastIndexOf(',') + 1).trimStart();
+      if (AC_CITE_RE.test(cmd)) { kind = 'cite'; typed = t2; }
+      else if (AC_REF_RE.test(cmd)) { kind = 'ref'; typed = t2; }
+      else if (/\\includegraphics\*?(?:\[[^\]]*\])?$/.test(cmd)) {
+        kind = 'graphic'; typed = t2;
+      }
+    }
+  }
+  if (kind === null) {
+    const m = /\\([a-zA-Z]*)$/.exec(prefix);
+    if (m && !(m.index > 0 && prefix[m.index - 1] === '\\')) {
+      kind = 'cmd'; typed = m[1].toLowerCase();
+    }
+  }
+  return kind ? {kind, typed} : null;
+}
+
+function attachRawAC(seg) {
+  let pop = null, items = [], sel = 0;
+
+  const close = () => {
+    if (pop) { pop.remove(); _acPops.delete(pop); pop = null; }
+  };
+
+  const render = () => {
+    pop.innerHTML = '';
+    items.forEach((it, ix) => {
+      const row = el('button', 'acitem' + (ix === sel ? ' sel' : ''));
+      row.type = 'button';
+      row.innerHTML = `<span class="actitle">${esc(it.title)}</span>` +
+        (it.sub ? `<span class="acsub">${esc(it.sub)}</span>` : '');
+      row.onmousedown = ev => { ev.preventDefault(); choose(ix); };
+      pop.append(row);
+    });
+  };
+
+  const choose = ix => {
+    const it = items[ix];
+    if (!it) { close(); return; }
+    const s = getSelection();
+    if (!s.rangeCount || !seg.contains(s.anchorNode)) { close(); return; }
+    const off = bcTextOffset(seg, s.anchorNode, s.anchorOffset);
+    const text = seg.textContent;
+    const ctx = prefixContext(text.slice(0, off));
+    if (!ctx) { close(); return; }
+    let start = off;
+    if (ctx.kind === 'cmd') {
+      const m = /\\([a-zA-Z]*)$/.exec(text.slice(0, off));
+      start = off - (m ? m[0].length : 0);
+    } else {
+      const pb = text.slice(0, off);
+      const brace = pb.lastIndexOf('{');
+      const partial = pb.slice(brace + 1);
+      start = brace + 1 + partial.lastIndexOf(',') + 1;
+    }
+    // command templates carry a '|' caret marker (\section{|}) — strip
+    // it and put the caret at that spot so typing continues inside the
+    // braces; cite/ref keys close their own brace when still open
+    const marker = it.insert.indexOf('|');
+    let ins = marker >= 0
+      ? it.insert.slice(0, marker) + it.insert.slice(marker + 1)
+      : it.insert;
+    if (ctx.kind !== 'cmd' && !text.slice(off).includes('}')) ins += '}';
+    seg.textContent = text.slice(0, start) + ins + text.slice(off);
+    const caretAt = start + (marker >= 0 ? marker : ins.length);
+    cePlaceTextOffset({ec: seg}, caretAt);
+    close();
+    seg.dispatchEvent(new Event('input', {bubbles: true}));
+    seg.focus();
+  };
+
+  const update = () => {
+    const s = getSelection();
+    if (!s.rangeCount || !seg.contains(s.anchorNode) || !s.isCollapsed) {
+      close(); return;
+    }
+    const off = bcTextOffset(seg, s.anchorNode, s.anchorOffset);
+    const ctx = prefixContext(seg.textContent.slice(0, off));
+    items = ctx ? acSuggestions(ctx.kind, ctx.typed) : [];
+    if (!items.length ||
+        (items.length === 1 &&
+         items[0].insert.toLowerCase() === ctx.typed.toLowerCase())) {
+      close(); return;
+    }
+    sel = 0;
+    if (!pop) {
+      pop = el('div', 'acpopup');
+      document.body.append(pop);
+      _acPops.set(pop, seg);
+    }
+    render();
+    const cr = s.getRangeAt(0).getBoundingClientRect();
+    pop.style.left = Math.max(8, Math.min(cr.left + window.scrollX,
+      window.innerWidth - 320)) + 'px';
+    pop.style.top = (cr.bottom + window.scrollY + 4) + 'px';
+  };
+
+  seg.addEventListener('input', update);
+  seg.addEventListener('keyup', update);
+  seg.addEventListener('click', update);
+  document.addEventListener('selectionchange', () => {
+    if (!pop) return;
+    const s2 = getSelection();
+    if (!s2.rangeCount || !seg.contains(s2.anchorNode)) close();
+  });
+  seg.addEventListener('keydown', e => {
+    if (!pop) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      render();
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) return; // save wins
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      choose(sel);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      close();
+    }
+  }, true);
+  seg.addEventListener('blur', () => setTimeout(close, 150));
+}
+
+function srcToText(s) {
+  // how a 1:1 source slice appears as DOM text (esc + space transforms)
+  return esc(s).replace(/\n/g, ' ').replace(/~/g, ' ');
+}
+
+// split the source into display groups: plain runs (text == source) and
+// atomic runs (commands/math — rendered, non-editable)
+function ceDisplayGroups(src) {
+  const toks = [];
+  _renderRec = toks;
+  try {
+    renderInline(src);
+  } finally {
+    _renderRec = null;
+  }
+  const groups = [];
+  let g = null;
+  const flush = () => { if (g) { groups.push(g); g = null; } };
+  for (const t of toks) {
+    const slice = src.slice(t.s0, t.s1);
+    if (!/[\\$]/.test(slice)) {
+      if (g && g.kind === 'plain') { g.s1 = t.s1; g.html += t.html; }
+      else { flush(); g = {kind: 'plain', s0: t.s0, s1: t.s1, html: t.html}; }
+    } else {
+      flush();
+      groups.push({kind: 'atomic', s0: t.s0, s1: t.s1, html: t.html});
+    }
+  }
+  flush();
+  return groups;
+}
+
+function ceRender(ref) {
+  const groups = ceDisplayGroups(ref.source);
+  ref.ec.innerHTML = '';
+  ref.spans = [];
+  for (const g of groups) {
+    const sp = el('span', 'tok tok-' + g.kind);
+    sp.dataset.s0 = g.s0;
+    sp.dataset.s1 = g.s1;
+    sp.dataset.src = ref.source.slice(g.s0, g.s1);
+    if (ref.active && g.kind === 'atomic' &&
+        g.s0 === ref.active.s0 && g.s1 === ref.active.s1) {
+      // the active command shows its raw source as editable text
+      sp.className = 'tok tok-raw';
+      sp.contentEditable = 'true';
+      sp.textContent = sp.dataset.src;
+      sp.dataset.kind = 'raw';
+    } else if (g.kind === 'atomic') {
+      sp.contentEditable = 'false';
+      sp.dataset.kind = 'atomic';
+      sp.innerHTML = g.html;
+    } else {
+      sp.dataset.kind = 'plain';
+      sp.innerHTML = g.html;
+    }
+    ref.ec.append(sp);
+  }
+}
+
+function ceSpans(ref) {
+  return [...ref.ec.querySelectorAll('[data-s0]')];
+}
+
+// rebuild the source from the edited DOM: atomic spans carry their exact
+// slice; plain/raw spans map text 1:1 (esc is per-char; whitespace runs
+// become plain spaces only in spans the user actually edited)
+function ceSourceFromDom(ref) {
+  let src = '';
+  for (const sp of ceSpans(ref)) {
+    const text = sp.textContent;
+    if (sp.dataset.kind === 'atomic') { src += sp.dataset.src; continue; }
+    src += text === srcToText(sp.dataset.src) ? sp.dataset.src : text;
+  }
+  return src;
+}
+
+function ceCaretSource(ref) {
+  const sel = getSelection();
+  if (!sel.rangeCount || !ref.ec.contains(sel.anchorNode)) return null;
+  const node = sel.anchorNode, off = sel.anchorOffset;
+  if (node === ref.ec || node.parentElement === ref.ec) {
+    // caret between/around spans
+    const kids = [...ref.ec.children];
+    if (!kids.length) return 0;
+    if (off === 0) return +kids[0].dataset.s0;
+    if (off >= kids.length) return +kids[kids.length - 1].dataset.s1;
+    return +kids[off - 1].dataset.s1;
+  }
+  const sp = node.parentElement && node.parentElement.closest('[data-s0]');
+  if (!sp) return null;
+  const s0 = +sp.dataset.s0;
+  if (node.nodeType === 1) {
+    const w = document.createTreeWalker(sp, NodeFilter.SHOW_TEXT);
+    let t = 0, seen = 0;
+    while (w.nextNode()) {
+      if (seen >= off) return s0 + t;
+      seen++;
+      t += w.currentNode.nodeValue.length;
+    }
+    return s0 + t;
+  }
+  const w = document.createTreeWalker(sp, NodeFilter.SHOW_TEXT);
+  let t = 0;
+  while (w.nextNode()) {
+    const tn = w.currentNode;
+    if (tn === node) return s0 + t + off;
+    t += tn.nodeValue.length;
+  }
+  return s0;
+}
+
+function cePlaceCaret(ref, srcOff) {
+  const spans = ceSpans(ref);
+  const sel = getSelection();
+  for (const sp of spans) {
+    const s0 = +sp.dataset.s0, s1 = +sp.dataset.s1;
+    if (srcOff < s0 || srcOff > s1) continue;
+    const r = document.createRange();
+    if (sp.dataset.kind === 'atomic') {
+      if (srcOff - s0 <= s1 - srcOff) r.setStartBefore(sp);
+      else r.setEndAfter(sp);
+      r.collapse(true);
+    } else {
+      const w = document.createTreeWalker(sp, NodeFilter.SHOW_TEXT);
+      let t = s0, placed = false;
+      while (w.nextNode()) {
+        const tn = w.currentNode;
+        if (srcOff <= t + tn.nodeValue.length) {
+          r.setStart(tn, Math.max(0, srcOff - t));
+          r.collapse(true);
+          placed = true;
+          break;
+        }
+        t += tn.nodeValue.length;
+      }
+      if (!placed) { r.selectNodeContents(sp); r.collapse(false); }
+    }
+    sel.removeAllRanges();
+    sel.addRange(r);
+    return;
+  }
+  const r = document.createRange();
+  r.selectNodeContents(ref.ec);
+  r.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+
+function openInlineEdit(b, ev, sourceOverride) {
+  // queued: a dirty raw file commits (and rebuilds) FIRST — this editor
+  // then opens on the settled DOM and stays open
+  enqueueOp(() => {
+    const b2 = blockById(b.id) || b;
+    reallyOpenInlineEdit(b2, ev, sourceOverride);
+  });
+}
+
+function reallyOpenInlineEdit(b, ev, sourceOverride) {
+  if (state.edit) closeEditor();
+  commitDirtyRawFiles();
+  if (state.inlineEdit) commitInlineEdit();
+  const node = $(`.block[data-id="${b.id}"]`);
+  const bc = node && node.querySelector('.bcontent');
+  if (!bc) return;
+  // the clicked text offset inside the rendered content maps 1:1 onto
+  // the editor's text (same rendering, same characters)
+  let textOff = null;
+  if (ev && document.caretRangeFromPoint) {
+    try {
+      const r = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+      if (r && bc.contains(r.startContainer)) {
+        textOff = bcTextOffset(bc, r.startContainer, r.startOffset);
+      }
+    } catch (e) { /* click outside the text — caret at the start */ }
+  }
+  node.classList.add('editing');
+  const ec = el('div', 'inline-ce');
+  ec.contentEditable = 'true';
+  ec.spellcheck = false;
+  state.inlineEdit = {id: b.id, block: b, ec,
+                      source: sourceOverride !== undefined ? sourceOverride : b.source,
+                      original: b.source, active: null, lastOff: null};
+  ceRender(state.inlineEdit);
+  bc.replaceWith(ec);
+  if (textOff !== null) {
+    // find the rendered span covering the click: plain spans are 1:1 with
+    // the source, atomic spans (commands/math) open raw with the caret
+    // directly in their first argument
+    let t = 0, hit = null, hitKind = null, hitOff = 0;
+    for (const sp of ceSpans(state.inlineEdit)) {
+      const len = sp.textContent.length;
+      if (textOff >= t && textOff <= t + len) {
+        hit = sp; hitKind = sp.dataset.kind; hitOff = textOff - t;
+        break;
+      }
+      t += len;
+    }
+    if (hit && hitKind === 'atomic') {
+      const s0 = +hit.dataset.s0, s1 = +hit.dataset.s1;
+      state.inlineEdit.active = {s0, s1};
+      ceRender(state.inlineEdit);
+      cePlaceCaret(state.inlineEdit,
+        s0 + commandEntryOffset(state.inlineEdit.source.slice(s0, s1)));
+    } else if (hit && hitKind === 'plain') {
+      cePlaceCaret(state.inlineEdit, +hit.dataset.s0 + hitOff);
+    } else {
+      cePlaceTextOffset(state.inlineEdit, textOff);
+    }
+  }
+  ec.focus();
+  ec.addEventListener('input', () => {
+    const ref = state.inlineEdit;
+    if (!ref || ref.ec !== ec) return;
+    const caretSrc = ceCaretSource(ref);
+    const src = ceSourceFromDom(ref);
+    if (src !== ref.source) {
+      ref.source = src;
+    }
+    // Rebuild the DOM only on TRANSITIONS — never per keystroke: a
+    // contenteditable torn down under the caret mid-typing loses the
+    // caret and the in-flight character (especially in Firefox)
+    let rebuild = false;
+    const raw = ec.querySelector('.tok-raw');
+    if (raw) {
+      // the raw fragment deactivates when the caret leaves it or a space
+      // follows its closing brace (the command renders)
+      const s0 = +raw.dataset.s0;
+      const end = s0 + raw.textContent.length;
+      const left = caretSrc === null ? '' : ref.source.slice(s0, caretSrc);
+      if (caretSrc === null || caretSrc < s0 || caretSrc > end ||
+          left.endsWith('} ')) {
+        ref.active = null;
+        rebuild = true;
+      }
+    } else {
+      // no raw fragment: did the text being typed just parse into a
+      // command under the caret? re-derive the group structure from the
+      // CURRENT source and flip that one command to its raw form so
+      // typing continues inside it. Only UNFINISHED commands (no closing
+      // brace/delimiter yet) or a caret strictly inside one flip — plain
+      // typing next to a finished chip leaves it rendered
+      const groups = ceDisplayGroups(ref.source);
+      const g = caretSrc === null ? null : groups.find(g2 =>
+        caretSrc >= g2.s0 && caretSrc <= g2.s1);
+      if (g && g.kind === 'atomic' &&
+          ((caretSrc > g.s0 && caretSrc < g.s1) ||
+           !/[}$]$/.test(ref.source.slice(g.s0, g.s1)))) {
+        ref.active = {s0: g.s0, s1: g.s1};
+        rebuild = true;
+      }
+    }
+    if (rebuild) {
+      ceRender(ref);
+      if (caretSrc !== null) {
+        // inside a newborn raw fragment the caret continues where the
+        // user was typing; after a deactivation it steps past the command
+        cePlaceCaret(ref, caretSrc);
+      }
+    }
+  });
+  // attached AFTER the inline input handler: its update must see the
+  // DOM state the inline handler just settled (ceRender + caret), not
+  // the pre-keystroke nodes it is about to replace
+  const ac = attachAutocompleteCE(ec);
+  ec.addEventListener('keydown', e => {
+    // while the autocomplete popup is open it owns these keys (accept,
+    // navigate, close) — the inline Enter-newline must not fire into the
+    // freshly completed command
+    if (ac.isOpen() &&
+        ['Enter', 'Tab', 'ArrowDown', 'ArrowUp', 'Escape'].includes(e.key)) {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        // save wins even with the popup open
+      } else {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Enter' || e.key === 'Tab') ac.chooseSelected();
+        else if (e.key === 'Escape') ac.closePopup();
+        else ac.navigate(e.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelInlineEdit();
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      commitInlineEdit();
+    } else if (e.key === 'Enter') {
+      // Enter while the caret is inside a command fragment renders the
+      // command instead of inserting a newline into its source
+      const rawEl = ec.querySelector('.tok-raw');
+      if (rawEl) {
+        e.preventDefault();
+        const off = ceCaretSource(state.inlineEdit);
+        state.inlineEdit.active = null;
+        ceRender(state.inlineEdit);
+        cePlaceCaret(state.inlineEdit, Math.max(off,
+          +rawEl.dataset.s0 + rawEl.textContent.length));
+        return;
+      }
+      // keep the content one flat text flow
+      e.preventDefault();
+      const sel = getSelection();
+      if (!sel.rangeCount) return;
+      const r = sel.getRangeAt(0);
+      r.deleteContents();
+      r.insertNode(document.createTextNode('\n'));
+      sel.collapseToEnd();
+      ec.dispatchEvent(new Event('input', {bubbles: true}));
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      // an arrow pushing out of the raw fragment renders the command and
+      // steps the caret just before/after it
+      const rawEl = ec.querySelector('.tok-raw');
+      if (!rawEl) return;
+      const s0 = +rawEl.dataset.s0, s1 = +rawEl.dataset.s1;
+      const off = ceCaretSource(state.inlineEdit);
+      if ((e.key === 'ArrowLeft' && off === s0) ||
+          (e.key === 'ArrowRight' && off === s1)) {
+        e.preventDefault();
+        state.inlineEdit.active = null;
+        ceRender(state.inlineEdit);
+        const outOff = e.key === 'ArrowLeft' ? s0 : s1;
+        state.inlineEdit.lastOff = outOff; // suppress instant re-activation
+        cePlaceCaret(state.inlineEdit, outOff);
+      }
+    }
+  });
+  // single-clicking a rendered command (ref/cite chips, backslash
+  // commands, math) opens its raw source with the caret in the first
+  // argument
+  ec.addEventListener('click', e => {
+    const atom = e.target.closest && e.target.closest('.tok-atomic');
+    if (!atom || !state.inlineEdit) return;
+    const s0 = +atom.dataset.s0, s1 = +atom.dataset.s1;
+    state.inlineEdit.active = {s0, s1};
+    ceRender(state.inlineEdit);
+    cePlaceCaret(state.inlineEdit, s0 +
+      commandEntryOffset(state.inlineEdit.source.slice(s0, s1)));
+  });
+  ec.addEventListener('dblclick', e => {
+    const atom = e.target.closest && e.target.closest('.tok-atomic');
+    if (!atom || !state.inlineEdit) return;
+    e.stopPropagation();
+    const s0 = +atom.dataset.s0, s1 = +atom.dataset.s1;
+    state.inlineEdit.active = {s0, s1};
+    ceRender(state.inlineEdit);
+    cePlaceCaret(state.inlineEdit, s0 +
+      commandEntryOffset(state.inlineEdit.source.slice(s0, s1)));
+  });
+  ec.addEventListener('paste', e => {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    document.execCommand('insertText', false, text);
+  });
+}
+
+function commitInlineEdit() {
+  return enqueueOp(async () => {
+    const ref = state.inlineEdit;
+    if (!ref) return;
+    state.inlineEdit = null;
+    closeOrphanAutocomplete();
+    const src = reflowLongLines(ref.source);
+    if (src === ref.original) {
+      rerenderBlock(ref.block);
+      return;
+    }
     try {
       const res = await ppost(`/block/${ref.id}/save`, {source: src});
       applyDoc(res.doc);
       toast('Saved');
-      checkBlocks([ref.id]); // background re-check of the edited block
-      refreshGitSoon(); // prompt green/red diff marks for the edit
+      checkBlocks([ref.id]);
+      refreshGitSoon();
     } catch (e) {
       handleOpError(e, ref.block);
-    }
-  };
-  saveBtn.onclick = commit;
-  cancelBtn.onclick = () => cancelRawEdit();
-  ta.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      commit();
+      rerenderBlock(ref.block);
     }
   });
-  state.rawEdit = {id: b.id, block: b, original: b.source, ta};
-  state._rawEscHandler = ev => {
-    if (ev.key === 'Escape' && !document.querySelector('.acpopup')) {
-      ev.stopPropagation();
-      ev.preventDefault();
-      cancelRawEdit();
-    }
-  };
-  document.addEventListener('keydown', state._rawEscHandler, true);
-  ta.focus();
 }
 
-function cancelRawEdit() {
-  const ref = state.rawEdit;
-  stopRawEditListener();
-  state.rawEdit = null;
+function cancelInlineEdit() {
+  const ref = state.inlineEdit;
   if (!ref) return;
-  // rebuild the cell statically — no full re-render needed
-  const cell = $(`.sbsraw[data-id="${ref.id}"]`);
-  if (!cell) return;
-  cell.classList.remove('editing');
-  cell.innerHTML = '';
-  if (EDITABLE.has(ref.block.type)) {
-    const src = el('div', 'rawsrc', esc(ref.block.source));
-    src.title = 'Click to edit the raw source';
-    src.addEventListener('click', () => activateRawEditor(ref.block));
-    cell.append(src);
-  } else {
-    cell.classList.add('ro');
-    cell.append(el('div', 'rawsrc', esc(ref.block.source)));
+  state.inlineEdit = null;
+  rerenderBlock(ref.block);
+}
+
+// text offset of a (node, offset) point within bc's rendered text
+function bcTextOffset(bc, node, off) {
+  const filter = {
+    acceptNode(n2) {
+      const p = n2.parentElement;
+      return (p && p.closest('.katex-mathml')) || !n2.nodeValue.length
+        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    }
+  };
+  const w = document.createTreeWalker(bc, NodeFilter.SHOW_TEXT, filter);
+  let t = 0;
+  while (w.nextNode()) {
+    const n2 = w.currentNode;
+    if (n2 === node) return t + off;
+    if (node.compareDocumentPosition(n2) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      return t; // n2 sits after the clicked point
+    }
+    t += n2.nodeValue.length;
   }
+  return t;
+}
+
+// place the caret at a rendered-text offset inside the editor (atomic
+// spans are included in the count; the browser clamps inside them and
+// the adjacency logic takes over)
+function cePlaceTextOffset(ref, textOff) {
+  const filter = {
+    acceptNode(n2) {
+      const p = n2.parentElement;
+      return (p && p.closest('.katex-mathml')) || !n2.nodeValue.length
+        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+    }
+  };
+  const w = document.createTreeWalker(ref.ec, NodeFilter.SHOW_TEXT, filter);
+  let t = 0;
+  const sel = getSelection();
+  while (w.nextNode()) {
+    const tn = w.currentNode;
+    if (textOff <= t + tn.nodeValue.length) {
+      const r = document.createRange();
+      r.setStart(tn, Math.max(0, textOff - t));
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+      return;
+    }
+    t += tn.nodeValue.length;
+  }
+  const r = document.createRange();
+  r.selectNodeContents(ref.ec);
+  r.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(r);
+}
+
+// caret offset within a command token that lands in its first argument:
+// \cmd{arg} → after the '{' (skipping [opt] args), $math$ → inside the
+// delimiter, argument-less commands → end of the name
+function commandEntryOffset(s) {
+  if (s[0] === '$') return Math.min(1, s.length);
+  if (s.startsWith('\\(')) return Math.min(2, s.length);
+  const m = /^\\([a-zA-Z]+\*?)/.exec(s);
+  if (!m) return 0;
+  let i = m[0].length;
+  while (i < s.length && s[i] === '[') {
+    const e = s.indexOf(']', i);
+    if (e < 0) return i;
+    i = e + 1;
+  }
+  if (s[i] === '{') return i + 1;
+  if (s[i] === ' ') return i + 1;
+  return i;
+}
+
+// when the caret comes to rest on a rendered command (arrows, or a
+// single click that lands at its boundary), open its raw source with
+// the caret in the first argument
+function tryActivateCommandAt(ref, off) {
+  const sp = ceSpans(ref).find(s2 => s2.dataset.kind === 'atomic' &&
+    (off === +s2.dataset.s0 || off === +s2.dataset.s1));
+  if (!sp) return false;
+  const s0 = +sp.dataset.s0, s1 = +sp.dataset.s1;
+  ref.active = {s0, s1};
+  ceRender(ref);
+  cePlaceCaret(ref, s0 + commandEntryOffset(ref.source.slice(s0, s1)));
+  return true;
+}
+
+// autocomplete for the inline contenteditable editor: same items and
+// popup as the textarea variant, driven by the caret inside the active
+// raw fragment (or a plain span the user is typing a command into)
+// autocomplete context for the inline contenteditable: what kind of
+// completion the caret qualifies for, and the exact insertion range
+// (text node, start offset, caret offset) it lives in — re-derived from
+// the LIVE dom on every use, so rebuilds never leave stale references
+function ceAcContext(ec) {
+  const s = getSelection();
+  if (!s.rangeCount) return null;
+  const r0 = s.getRangeAt(0);
+  let node = r0.startContainer, off = r0.startOffset;
+  if (!ec.contains(node)) return null;
+  if (node.nodeType !== 3) {
+    // element-anchored selection (caret at a node boundary after a
+    // delete): resolve to the adjacent text position
+    const kids = node.childNodes;
+    if (off > 0 && kids[off - 1] &&
+        kids[off - 1].nodeType === 3) {
+      node = kids[off - 1];
+      off = node.nodeValue.length;
+    } else if (kids[off] && kids[off].nodeType === 3) {
+      node = kids[off];
+      off = 0;
+    } else {
+      const w0 = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+      let last = null;
+      while (w0.nextNode()) last = w0.currentNode;
+      if (!last) return null;
+      node = last;
+      off = node.nodeValue.length;
+    }
+    if (!ec.contains(node)) return null;
+  }
+  const span = node.parentElement && node.parentElement.closest('[data-s0]');
+  if (!span || !ec.contains(span)) return null;
+  const w = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);
+  let prefix = '', inNode = false;
+  while (w.nextNode()) {
+    const tn = w.currentNode;
+    if (tn === node) {
+      prefix += tn.nodeValue.slice(0, off);
+      inNode = true;
+      break;
+    }
+    prefix += tn.nodeValue;
+  }
+  if (!inNode) return null;
+  let kind = null, typed = '', start = 0;
+  const brace = prefix.lastIndexOf('{');
+  if (brace >= 0) {
+    const cmd = prefix.slice(0, brace);
+    const partial = prefix.slice(brace + 1);
+    if (!/[{}]/.test(partial)) {
+      const typed2 = partial.slice(partial.lastIndexOf(',') + 1).trimStart();
+      const argStart = brace + 1 + partial.lastIndexOf(',') + 1;
+      if (AC_CITE_RE.test(cmd)) { kind = 'cite'; typed = typed2; start = argStart; }
+      else if (AC_REF_RE.test(cmd)) { kind = 'ref'; typed = typed2; start = argStart; }
+      else if (/\\includegraphics\*?(?:\[[^\]]*\])?$/.test(cmd)) {
+        kind = 'graphic'; typed = typed2; start = argStart;
+      }
+    }
+  }
+  if (kind === null) {
+    const m = /\\([a-zA-Z]*)$/.exec(prefix);
+    if (m && !(m.index > 0 && prefix[m.index - 1] === '\\')) {
+      kind = 'cmd'; typed = m[1].toLowerCase();
+      start = prefix.length - m[0].length;
+    }
+  }
+  if (kind === null) return null;
+  return {kind, node, start, offset: off, typed};
+}
+
+function attachAutocompleteCE(ec) {
+  let pop = null, items = [], sel = 0, ctx = null;
+
+  const close = () => {
+    if (pop) { pop.remove(); _acPops.delete(pop); pop = null; ctx = null; }
+  };
+
+  const render = () => {
+    pop.innerHTML = '';
+    items.forEach((it, ix) => {
+      const row = el('button', 'acitem' + (ix === sel ? ' sel' : ''));
+      row.type = 'button';
+      row.innerHTML = `<span class="actitle">${esc(it.title)}</span>` +
+        (it.sub ? `<span class="acsub">${esc(it.sub)}</span>` : '');
+      row.onmousedown = ev => { ev.preventDefault(); choose(ix); };
+      pop.append(row);
+    });
+  };
+
+  const choose = ix => {
+    const it = items[ix];
+    if (!it) { close(); return; }
+    // re-derive the insertion point from the LIVE dom: the stored ctx.node
+    // goes stale whenever ceRender rebuilds the editor's spans
+    const cur = ceAcContext(ec);
+    if (!cur) { close(); return; }
+    const done = caretOff => {
+      const s = getSelection();
+      s.removeAllRanges();
+      const r2 = document.createRange();
+      r2.setStart(cur.node, caretOff);
+      r2.collapse(true);
+      s.addRange(r2);
+      // acceptance always closes the popup — including the one the input
+      // dispatch below may recreate for the exact match
+      ec.dispatchEvent(new Event('input', {bubbles: true}));
+      // close only THIS instance's popup — a DOM-wide sweep would detach
+      // other editors' popup nodes while their closures still hold them
+      close();
+      pop = null;
+      ec.focus();
+    };
+    // command templates carry a '|' caret marker (\section{|}) — strip it
+    // and remember where the caret belongs; cite/ref keys get a closing
+    // brace appended only when the command's brace is still open
+    const marker = it.insert.indexOf('|');
+    let ins = marker >= 0
+      ? it.insert.slice(0, marker) + it.insert.slice(marker + 1)
+      : it.insert;
+    const restRaw = cur.node.nodeValue.slice(cur.offset);
+    if (cur.kind !== 'cmd' && !restRaw.includes('}')) ins += '}';
+    const caretAt = cur.start + (marker >= 0 ? marker : ins.length);
+    // the key is already complete right after the caret (typed in, or
+    // accepted a moment ago): settle the caret after it — no duplication
+    const rest = restRaw.toLowerCase();
+    if (rest.startsWith(ins.toLowerCase()) ||
+        (rest + '}').startsWith(ins.toLowerCase() + '}')) {
+      done(cur.offset + ins.length);
+      return;
+    }
+    // mutate the text node directly — insertNode would split it and the
+    // original node (holding the caret anchor) would be left empty
+    cur.node.nodeValue = cur.node.nodeValue.slice(0, cur.start) + ins +
+      cur.node.nodeValue.slice(cur.offset);
+    done(Math.min(caretAt, cur.start + ins.length));
+  };
+
+  const update = () => {
+    ctx = ceAcContext(ec);
+    if (!ctx) { close(); return; }
+    items = acSuggestions(ctx.kind, ctx.typed);
+    if (!items.length) { close(); return; }
+    // fully typed: the completion is done — keep the list from hovering
+    // over the exact match it just completed
+    if (items.length === 1 &&
+        items[0].insert.toLowerCase() === ctx.typed.toLowerCase()) {
+      close();
+      return;
+    }
+    sel = 0;
+    if (!pop) {
+      pop = el('div', 'acpopup');
+      document.body.append(pop);
+      _acPops.set(pop, ec);
+      window.__acCreations = (window.__acCreations || 0) + 1;
+    }
+    render();
+    const s2 = getSelection();
+    if (!s2.rangeCount) { close(); return; }
+    const cr = s2.getRangeAt(0).getBoundingClientRect();
+    pop.style.left = Math.max(8, Math.min(cr.left + window.scrollX,
+      window.innerWidth - 320)) + 'px';
+    pop.style.top = (cr.bottom + window.scrollY + 4) + 'px';
+  };
+
+  ec.addEventListener('input', update);
+  // the popup dies with the caret: leaving the editor (or losing focus)
+  // closes it — no stale overlays over non-editing blocks
+  document.addEventListener('selectionchange', () => {
+    if (!pop) return;
+    const s2 = getSelection();
+    if (!s2.rangeCount || !ec.contains(s2.anchorNode)) close();
+  });
+  ec.addEventListener('blur', () => setTimeout(close, 120));
+  return {
+    update,
+    isOpen: () => !!pop,
+    closePopup: close,
+    chooseSelected: () => choose(sel),
+    navigate: d => { sel = (sel + d + items.length) % items.length; render(); },
+  };
 }
 
 function blockEl(b, hidden = false) {
@@ -1707,11 +2684,17 @@ function blockEl(b, hidden = false) {
     });
   }
   if (EDITABLE.has(b.type)) {
-    // double-click edits; single click stays free for text marking
+    // double-click edits; single click stays free for text marking.
+    // in side-by-side mode prose blocks edit in place, styled as rendered
     node.addEventListener('dblclick', ev => {
-      if (ev.target.closest('.editor') || ev.target.closest('.btools') ||
+      if (ev.target.closest('.editor') || ev.target.closest('.inline-ce') ||
+          ev.target.closest('.btools') ||
           ev.target.closest('.grip') || ev.target.closest('a')) return;
-      openEditor(b);
+      if (state.sbs && (b.type === 'paragraph' || b.type === 'comment')) {
+        openInlineEdit(b, ev);
+      } else {
+        openEditor(b);
+      }
     });
   }
   return node;
@@ -1883,9 +2866,20 @@ function markStale(id) {
 /* editors                                                             */
 /* ------------------------------------------------------------------ */
 
+// serialized mutations: raw-file PUTs, block saves and editor opens run
+// in order, so one writer's applyDoc rebuild can't land under another's
+// feet (open editor mid-dblclick, stale doc overwriting a newer save)
+function enqueueOp(fn) {
+  const prev = state._opQ || Promise.resolve();
+  const run = prev.then(fn, fn);
+  state._opQ = run.catch(() => {});
+  return run;
+}
+
 function rerenderBlock(b) {
   const old = $(`.block[data-id="${b.id}"]`);
   if (!old) return;
+  closeOrphanAutocomplete(); // popups keyed to the replaced DOM die with it
   const fresh = blockEl(b);
   const liveFigures = harvestFigureMedia(old);
   if (liveFigures.size) transplantFigureMedia(fresh, liveFigures);
@@ -1931,7 +2925,15 @@ function closeEditor() {
 }
 
 function openEditor(b, freshOpts) {
-  if (state.rawEdit) cancelRawEdit(); // one active editor at a time
+  enqueueOp(() => {
+    const b2 = blockById(b.id) || b;
+    reallyOpenEditor(b2, freshOpts);
+  });
+}
+
+function reallyOpenEditor(b, freshOpts) {
+  if (state.inlineEdit) commitInlineEdit(); // one active editor at a time
+  commitDirtyRawFiles();
   if (state.edit) {
     if (state.edit.id === b.id) return;
     closeEditor();
@@ -3649,10 +4651,42 @@ function toggleGitHl() {
   rerenderContentPreservingScroll();
 }
 
+// per-project slot for the reading position taken when entering the
+// diff-only view — restored when leaving it
+function diffReturnKey() {
+  const p = state.projects.find(x => x.id === state.project);
+  return p ? 'diffrpos:' + p.main : null;
+}
+
+function saveDiffReturnPos() {
+  const k = diffReturnKey();
+  if (!k || !state.doc) return;
+  const el = [...document.querySelectorAll('#content .block')]
+    .find(n => n.getBoundingClientRect().bottom > 0);
+  if (!el || !el.dataset.id) return;
+  const off = Math.max(0, -el.getBoundingClientRect().top);
+  try { localStorage.setItem(k, JSON.stringify({id: el.dataset.id, off})); }
+  catch (e) { /* best-effort */ }
+}
+
+function restoreDiffReturnPos() {
+  const k = diffReturnKey();
+  if (!k) return false;
+  let pos = null;
+  try { pos = JSON.parse(localStorage.getItem(k) || 'null'); } catch (e) {}
+  if (!pos || !pos.id) return false;
+  const el = document.querySelector(`#content .block[data-id="${pos.id}"]`);
+  if (!el) return false;
+  $('#content').scrollTop += el.getBoundingClientRect().top + (pos.off || 0);
+  return true;
+}
+
 function toggleDiffOnly() {
-  state.gitShowDiff = !state.gitShowDiff;
+  const entering = !state.gitShowDiff;
+  if (entering) saveDiffReturnPos(); // always remember where we came from
+  state.gitShowDiff = entering;
   localStorage.setItem('git-show-diff', state.gitShowDiff ? '1' : '0');
-  // preserve the reading position across the re-render
+  // keep the view anchored when the anchor block survives the re-render
   const content = $('#content');
   const firstVisible = [...document.querySelectorAll('.block')]
     .find(n => n.getBoundingClientRect().bottom > 0);
@@ -3661,7 +4695,13 @@ function toggleDiffOnly() {
     ? (document.querySelector(`.block[data-id="${anchorId}"]`) || {}).offsetTop : 0;
   renderContent();
   renderGit();
-  if (anchorId) {
+  if (!entering) {
+    // back to the full document — land at the saved pre-diff position
+    if (!restoreDiffReturnPos() && anchorId) {
+      const n = document.querySelector(`.block[data-id="${anchorId}"]`);
+      if (n) content.scrollTop += n.offsetTop - prevOffset;
+    }
+  } else if (anchorId) {
     const n = document.querySelector(`.block[data-id="${anchorId}"]`);
     if (n) content.scrollTop += n.offsetTop - prevOffset;
   }
@@ -3911,6 +4951,9 @@ async function gitCommit(ta) {
     applyGitHighlights();
     applyOutlineGitMarks();
     applyGitDiffRerender(); // HEAD moved — green/red marks must clear now
+    // committing from the diff-only view: its purpose is served — return
+    // to the full document at the saved pre-diff reading position
+    if (state.gitShowDiff) toggleDiffOnly();
     toast('Committed: ' + res.summary);
   } catch (e) { toast('Commit failed: ' + e.message, true); }
 }
@@ -4458,6 +5501,14 @@ function initProofHover() {
   document.addEventListener('click', ev => {
     const chip = ev.target.closest && ev.target.closest('.refchip');
     if (!chip) return;
+    // inside the inline editor a plain click edits the command instead;
+    // ctrl+click keeps the jump-to-target
+    if (chip.closest('.inline-ce') && !ev.ctrlKey) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      hideProofPopup();
+      return;
+    }
     const blk = labelBlock(chip.dataset.label);
     if (!blk) return;
     ev.preventDefault();
@@ -4646,16 +5697,14 @@ function restoreReadPos() {
 
 function applyDoc(doc, fromDisk = false) {
   updateHighlights(doc, fromDisk);
-  // capture the in-progress raw-side editor before the re-render rebuilds
-  // its DOM (value + caret — the old textarea won't survive renderAll)
-  let rawKeep = null;
-  if (state.rawEdit) {
-    rawKeep = {value: state.rawEdit.ta.value, sel: null};
-    if (document.activeElement === state.rawEdit.ta &&
-        typeof state.rawEdit.ta.selectionStart === 'number') {
-      rawKeep.sel = {s: state.rawEdit.ta.selectionStart,
-        e: state.rawEdit.ta.selectionEnd};
-    }
+  // capture tracked raw files (texts + caret) before the re-render
+  const rawKeepAD = state.sbsFiles.size ? harvestRawKeep() : null;
+  // same for an in-progress inline edit (rendered-column live editing)
+  let inlineKeep = null;
+  if (state.inlineEdit) {
+    inlineKeep = {id: state.inlineEdit.id, source: state.inlineEdit.source,
+      caret: ceCaretSource(state.inlineEdit)};
+    state.inlineEdit = null;
   }
   // keep an open editor alive if its block still exists unchanged on disk
   let keep = null;
@@ -4678,24 +5727,16 @@ function applyDoc(doc, fromDisk = false) {
   pruneProofIssues(doc); // drop issues whose block text changed
   renderAll();
 
-  // keep an in-progress raw-side editor alive when its block survived the
-  // re-parse unchanged — same contract as the rendered editor above
-  if (state.rawEdit) {
-    const m = doc.blocks.find(x => x.file === state.rawEdit.block.file &&
-      x.source === state.rawEdit.original && x.type === state.rawEdit.block.type);
-    stopRawEditListener();
-    state.rawEdit = null;
-    if (m) {
-      const cell = $(`.sbsraw[data-id="${m.id}"]`);
-      if (cell) {
-        cell.innerHTML = '';
-        buildRawEditor(cell, m, rawKeep.value);
-        if (rawKeep.sel) {
-          const ta = cell.querySelector('textarea');
-          ta.focus();
-          ta.setSelectionRange(rawKeep.sel.s, rawKeep.sel.e);
-        }
-      }
+  // tracked raw files re-register with their texts and caret restored
+  if (rawKeepAD) restoreRawKeep(rawKeepAD);
+
+  // an in-progress inline edit re-opens on its block when the block
+  // itself survived (ids are stable across structure-preserving re-parses)
+  if (inlineKeep) {
+    const m2 = doc.blocks.find(x => x.id === inlineKeep.id);
+    if (m2) {
+      openInlineEdit(m2, null, inlineKeep.source);
+      cePlaceCaret(state.inlineEdit, inlineKeep.caret);
     }
   }
 
@@ -4924,13 +5965,65 @@ connectWS();
   const sbsbtn = $('#sbsbtn');
   sbsbtn.classList.toggle('toggled', state.sbs);
   sbsbtn.addEventListener('click', () => {
-    if (state.rawEdit) cancelRawEdit();
     if (state.edit) closeEditor();
+    if (state.inlineEdit) commitInlineEdit();
+    commitDirtyRawFiles();
     state.sbs = !state.sbs;
     try { localStorage.setItem('sbs', state.sbs ? '1' : '0'); } catch (e) {}
     sbsbtn.classList.toggle('toggled', state.sbs);
     renderContentPreservingScroll();
   });
+  // inline editing: the caret entering/leaving a command shows/hides its
+  // raw source (the rest of the text stays rendered). Entering places the
+  // caret directly in the command's first argument
+  document.addEventListener('selectionchange', () => {
+    const ref = state.inlineEdit;
+    if (!ref || !ref.ec.contains(getSelection().anchorNode)) return;
+    const off = ceCaretSource(ref);
+    if (off === null || off === ref.lastOff) return;
+    ref.lastOff = off;
+    const raw = ref.ec.querySelector('.tok-raw');
+    if (raw) {
+      // the fragment's live text length, not dataset.s1 — the fragment
+      // may have grown since the last render (accepted completion)
+      const s0 = +raw.dataset.s0;
+      const s1 = s0 + raw.textContent.length;
+      if (off < s0 || off > s1) {
+        // the caret left the raw command — render it again; a click or
+        // arrow-stop on another command opens that one directly
+        ref.active = null;
+        ceRender(ref);
+        if (!tryActivateCommandAt(ref, off)) cePlaceCaret(ref, off);
+      }
+      return;
+    }
+    tryActivateCommandAt(ref, off);
+  });
+  // clicking outside the edited block / a raw file editor commits it —
+  // independent of blur, which is not delivered reliably in every embedding
+  document.addEventListener('mousedown', e => {
+    const ref = state.inlineEdit;
+    if (ref) {
+      if (e.target.closest('.acpopup')) return;
+      const node = document.querySelector(`.block[data-id="${ref.id}"]`);
+      if (!(node && node.contains(e.target))) commitInlineEdit();
+    }
+    // clicking outside a file's raw column commits that file's edits —
+    // but clicks in the rendered column are left to the editor-open path
+    // (committing here would rebuild the DOM mid-dblclick and eject the
+    // editor that dblclick is about to open)
+    const inLeft = e.target.closest && e.target.closest('.sbsl');
+    if (!inLeft) for (const path of [...state.sbsFiles.keys()]) {
+      const inside = e.target.closest &&
+        e.target.closest(`.sbsfileseg[data-file="${CSS.escape(path)}"]`);
+      if (inside) continue;
+      if (rawFileText(path) === state.sbsFiles.get(path).original) {
+        state.sbsFiles.delete(path);
+      } else {
+        commitRawFile(path);
+      }
+    }
+  }, true);
   // raster figures whose literal path 404s (file moved, graphicspath use)
   // resolve via the server and swap the src; pdf/eps figures never get a
   // doomed src (figureMediaHtml resolves first), so nothing to do here

@@ -3,6 +3,7 @@
 Starts one server that can hold several projects; projects persist per port
 on disk (~/.texperiment/projects.json) and more can be added from the UI."""
 import argparse
+import asyncio
 import signal
 import threading
 import time
@@ -10,6 +11,15 @@ import time
 import uvicorn
 
 from .server import create_app
+
+
+def _silence_connection_reset(loop, context):
+    """Windows Proactor IO: browsers can drop keep-alive connections
+    mid-shutdown, and asyncio logs every such reset as an exception even
+    though uvicorn handles it fine — swallow it instead."""
+    if isinstance(context.get('exception'), ConnectionResetError):
+        return  # handled
+    loop.default_exception_handler(context)
 
 
 def main():
@@ -35,6 +45,11 @@ def main():
 
     # Run uvicorn in a daemon thread so the main thread keeps Python's default
     # signal handling — on Windows, uvicorn's own handlers can swallow Ctrl+C.
+    # Proactor sockets dropping keep-alive connections log noisy
+    # ConnectionResetError tracebacks — silence them for this loop.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.set_exception_handler(_silence_connection_reset)
     config = uvicorn.Config(app, host=args.host, port=args.port,
                             log_level='warning')
     server = uvicorn.Server(config)
