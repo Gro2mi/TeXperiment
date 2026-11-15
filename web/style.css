@@ -975,3 +975,14 @@ tr.rulegap td:hover .ruleadd { display: inline; }
   margin: 0; height: 16px; opacity: 0; pointer-events: none;
 }
 .sbsl:hover .insertline { opacity: 1; pointer-events: auto; }
+/* git busy: banner shown while stage/commit/push/etc. run in flight */
+.gitbusy {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--soft-bg); border: 1px solid var(--panel-line);
+  border-radius: 5px; padding: 6px 10px; margin: 4px 0;
+  font-size: 12px; color: var(--panel-ink);
+}
+.gbtn:disabled, .gitgrouphead .gbtn:disabled { opacity: .4; cursor: default; }
+/* section headings carry their own top margin — offset the raw text to
+   match the rendered heading line */
+.sbsrow:has(.b-section) .sbsfileseg { padding-top: 29px; }

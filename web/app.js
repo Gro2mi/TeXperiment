@@ -30,6 +30,8 @@ const state = {
     checking: false,
     checked: false,
   },
+  gitBusy: 0,        // in-flight git operations (stage/commit/push/...)
+  gitBusyLabel: '',  // what is running, shown in the git panel banner
   history: {can_undo: false, can_redo: false}, // server-side undo/redo flags
   bib: null,         // parsed .bbl: {style, entries} — null = not loaded
   graphics: [],      // project graphics files for \includegraphics autocomplete
@@ -1611,6 +1613,24 @@ function renderContent() {
   // in sbs mode the tracked raw files' texts and caret move across the
   // re-render (the segments themselves are rebuilt)
   const rawKeep = state.sbs ? harvestRawKeep() : null;
+  // an open inline editor must survive this re-render: capture its node
+  // and caret offset, reattach below (keeps the editor open across git
+  // refreshes and other re-renders — no more silent editor ejection)
+  let inlineKeepNode = null, inlineKeepCaret = null;
+  if (state.inlineEdit) {
+    const ref = state.inlineEdit;
+    const s = getSelection();
+    if (s.rangeCount && ref.ec.contains(s.anchorNode)) {
+      const w2 = document.createTreeWalker(ref.ec, NodeFilter.SHOW_TEXT);
+      let t2 = 0, found = false;
+      while (w2.nextNode()) {
+        const tn2 = w2.currentNode;
+        if (tn2 === s.anchorNode) { inlineKeepCaret = t2 + s.anchorOffset; found = true; break; }
+        t2 += tn2.nodeValue.length;
+      }
+      if (found) inlineKeepNode = ref.ec;
+    }
+  }
   // git ghost rows: blocks removed since HEAD (only with highlighting on)
   const ghosts = (state.gitHl && state.git && state.git.repo
     && state.gitDiff && state.gitDiff.ghosts) ? state.gitDiff.ghosts : [];
@@ -1638,6 +1658,11 @@ function renderContent() {
       // left cell: the block plus a hover add-block bar above it
       const left = el('div', 'sbsl');
       left.append(insertLine(b, h || isBlankComment(b)), blockEl(b));
+      // an open inline editor for THIS block moves back into place
+      if (inlineKeepNode && state.inlineEdit && state.inlineEdit.id === b.id) {
+        const freshBc = left.querySelector('.bcontent');
+        if (freshBc) freshBc.replaceWith(inlineKeepNode);
+      }
       row.append(left, rawSeg(b, firstOfFile, lastOfFile));
       docEl.append(row);
       if (state.sbs) continue;
@@ -1655,6 +1680,25 @@ function renderContent() {
     }
   }
   if (state.sbs && rawKeep && rawKeep.length) restoreRawKeep(rawKeep);
+  // an open inline editor was moved back into place — restore its caret
+  if (inlineKeepNode && state.inlineEdit && state.inlineEdit.ec === inlineKeepNode) {
+    const w2 = document.createTreeWalker(inlineKeepNode, NodeFilter.SHOW_TEXT);
+    let t2 = 0, n2 = null;
+    while (w2.nextNode()) {
+      const tn2 = w2.currentNode;
+      if (inlineKeepCaret <= t2 + tn2.nodeValue.length) { n2 = tn2; break; }
+      t2 += tn2.nodeValue.length;
+    }
+    if (n2) {
+      const r2 = document.createRange();
+      r2.setStart(n2, Math.max(0, inlineKeepCaret - t2));
+      r2.collapse(true);
+      const s2 = getSelection();
+      s2.removeAllRanges();
+      s2.addRange(r2);
+      inlineKeepNode.focus();
+    }
+  }
   for (const ge of (flushGhosts(null) || [])) docEl.append(ge);
   if (pending.length) pending.forEach(g => docEl.append(ghostEl(g))); // anchors hidden
   if (liveFigures && liveFigures.size) transplantFigureMedia(docEl, liveFigures);
@@ -2214,30 +2258,15 @@ function reallyOpenInlineEdit(b, ev, sourceOverride) {
         ref.active = null;
         rebuild = true;
       }
-    } else {
-      // no raw fragment: did the text being typed just parse into a
-      // command under the caret? re-derive the group structure from the
-      // CURRENT source and flip that one command to its raw form so
-      // typing continues inside it. Only UNFINISHED commands (no closing
-      // brace/delimiter yet) or a caret strictly inside one flip — plain
-      // typing next to a finished chip leaves it rendered
-      const groups = ceDisplayGroups(ref.source);
-      const g = caretSrc === null ? null : groups.find(g2 =>
-        caretSrc >= g2.s0 && caretSrc <= g2.s1);
-      if (g && g.kind === 'atomic' &&
-          ((caretSrc > g.s0 && caretSrc < g.s1) ||
-           !/[}$]$/.test(ref.source.slice(g.s0, g.s1)))) {
-        ref.active = {s0: g.s0, s1: g.s1};
-        rebuild = true;
-      }
+    } else if (caretSrc !== null &&
+               activateRawUnderCaret(ref, caretSrc)) {
+      // typing parsed into a command under the caret: it flipped to raw,
+      // rebuild and restore the caret so typing continues inside it
+      rebuild = true;
     }
     if (rebuild) {
       ceRender(ref);
-      if (caretSrc !== null) {
-        // inside a newborn raw fragment the caret continues where the
-        // user was typing; after a deactivation it steps past the command
-        cePlaceCaret(ref, caretSrc);
-      }
+      if (caretSrc !== null) cePlaceCaret(ref, caretSrc);
     }
   });
   // attached AFTER the inline input handler: its update must see the
@@ -2454,6 +2483,17 @@ function tryActivateCommandAt(ref, off) {
   ref.active = {s0, s1};
   ceRender(ref);
   cePlaceCaret(ref, s0 + commandEntryOffset(ref.source.slice(s0, s1)));
+  return true;
+}
+
+// typing text that just parsed into a command under the caret flips that
+// span to its raw form — the '' stays visible while the command grows
+function activateRawUnderCaret(ref, caretSrc) {
+  if (caretSrc === null || ref.ec.querySelector('.tok-raw')) return false;
+  const g = ceDisplayGroups(ref.source).find(g2 =>
+    caretSrc >= g2.s0 && caretSrc <= g2.s1);
+  if (!g || g.kind !== 'atomic') return false;
+  ref.active = {s0: g.s0, s1: g.s1};
   return true;
 }
 
@@ -2691,8 +2731,12 @@ function blockEl(b, hidden = false) {
           ev.target.closest('.btools') ||
           ev.target.closest('.grip') || ev.target.closest('a')) return;
       if (state.sbs && (b.type === 'paragraph' || b.type === 'comment')) {
+        window.__dlog = (window.__dlog || []);
+        window.__dlog.push('sbs-open ' + b.id);
         openInlineEdit(b, ev);
+        window.__dlog.push('opened=' + !!document.querySelector('.inline-ce'));
       } else {
+        window.__dlog.push('openEditor ' + b.id);
         openEditor(b);
       }
     });
@@ -4584,9 +4628,12 @@ async function refreshGit() {
   } catch (e) {
     return; // git hiccups shouldn't nag on every save
   }
-  renderGit();
   applyGitHighlights();
   applyOutlineGitMarks();
+  // git work in flight: status/changes are refreshed but the panel is not
+  // rebuilt (it shows the busy banner) and blocks are not re-rendered
+  if (state.gitBusy) return;
+  renderGit();
   // inline diff marks and ghosts live in the rendered blocks — re-render
   // when the diff actually changed (not on every status refresh); the diff
   // content is part of the signature, so re-editing an already-changed
@@ -4724,6 +4771,14 @@ function renderGit() {
     panel.append(el('div', 'gitmuted', 'checking…'));
     return;
   }
+  // git work in flight: banner + all controls disabled
+  if (state.gitBusy) {
+    const busy = el('div', 'gitbusy',
+      `<span class="spin"></span> Git ${state.gitBusyLabel || 'working'}…`);
+    panel.append(busy);
+    $('#gitHead').classList.remove('hidden');
+    return;
+  }
   if (!g.repo) {
     panel.append(el('div', 'gitmuted', 'Not a git repository.'));
     const btn = el('button', 'edbtn gitinit', 'Initialize repository');
@@ -4762,9 +4817,10 @@ function renderGit() {
   views.append(hlBtn, diffBtn, diskBtn);
   panel.append(views);
 
-  if (g.staged.length) panel.append(gitFileGroup('Staged changes', g.staged, 'staged'));
-  if (g.unstaged.length) panel.append(gitFileGroup('Changes', g.unstaged, 'unstaged'));
-  if (g.untracked.length) panel.append(gitFileGroup('Untracked', g.untracked, 'untracked'));
+  const dis = state.gitBusy ? ' disabled' : '';
+  if (g.staged.length) panel.append(gitFileGroup('Staged changes', g.staged, 'staged', state.gitBusy));
+  if (g.unstaged.length) panel.append(gitFileGroup('Changes', g.unstaged, 'unstaged', state.gitBusy));
+  if (g.untracked.length) panel.append(gitFileGroup('Untracked', g.untracked, 'untracked', state.gitBusy));
   if (!g.staged.length && !g.unstaged.length && !g.untracked.length) {
     panel.append(el('div', 'gitmuted', 'Working tree clean ✓'));
   }
@@ -4776,7 +4832,10 @@ function renderGit() {
   const bar = el('div', 'gitbar');
   const commitBtn = el('button', 'edbtn primary', '✓ Commit');
   const pushBtn = el('button', 'edbtn', '⇅ Push');
-  if (state.pushing) {
+  if (state.gitBusy) {
+    commitBtn.disabled = true;
+    pushBtn.disabled = true;
+  } else if (state.pushing) {
     pushBtn.disabled = true;
     pushBtn.innerHTML = '<span class="spin"></span> Pushing…';
     pushBtn.title = 'Push in progress';
@@ -4803,7 +4862,7 @@ function renderGit() {
   }
 }
 
-function gitFileGroup(title, paths, kind) {
+function gitFileGroup(title, paths, kind, busy) {
   const wrap = el('div', 'gitgroup');
   const head = el('div', 'gitgrouphead');
   head.append(el('span', '', `${title} (${paths.length})`));
@@ -4811,6 +4870,7 @@ function gitFileGroup(title, paths, kind) {
   const hbtn = (label, tip, fn) => {
     const b2 = el('button', 'gbtn', label);
     b2.title = tip;
+    if (busy) b2.disabled = true;
     b2.onclick = e2 => { e2.stopPropagation(); fn(); };
     hbtns.append(b2);
   };
@@ -4834,6 +4894,7 @@ function gitFileGroup(title, paths, kind) {
     const mk = (label, tip, fn) => {
       const b = el('button', 'gbtn', label);
       b.title = tip;
+      if (busy) b.disabled = true;
       b.onclick = ev => { ev.stopPropagation(); fn(); };
       return b;
     };
@@ -4860,14 +4921,12 @@ async function toggleBlockStage(b) {
     dd.staged = res.staged;
     // flip this block's button(s) immediately — the authoritative
     // re-render follows once blockdiffs answers
-    document.querySelectorAll('button.stage-in-block').forEach(bt => {
-      const blk = bt.closest('.block');
-      if (blk && blk.dataset.id === b.id) {
+    document.querySelectorAll(`.block[data-id="${b.id}"] button.stage-block`)
+      .forEach(bt => {
         bt.classList.toggle('staged', dd.staged);
         bt.title = dd.staged ? 'Unstage this block\u2019s change'
           : 'Stage this block\u2019s change';
-      }
-    });
+      });
     toast(dd.staged ? 'Block change staged' : 'Block change unstaged');
     // refresh everything the click affects, each part as soon as it
     // arrives: the sidebar groups come from the cheap status call,
@@ -4895,21 +4954,36 @@ function stageBlockButton(b) {
   const dd = state.gitDiff && state.gitDiff.diffs[b.id];
   if (!dd || !state.git || !state.git.repo) return null;
   const btn = el('button', 'btools-btn stage-block' + (dd.staged ? ' staged' : ''), '⇅');
-  btn.title = dd.staged ? 'Unstage this block\u2019s change'
-    : 'Stage this block\u2019s change';
+  btn.title = dd.staged ? 'Unstage this block’s change'
+    : 'Stage this block’s change';
   btn.onclick = ev => { ev.stopPropagation(); toggleBlockStage(b); };
   return btn;
 }
 
+// mark git work as in-flight: renderGit disables all controls and shows
+// what is running; refGits during the operation skip re-render (renderGit
+// would recreate the buttons mid-operation)
+function gitBusyStart(label) {
+  state.gitBusy++;
+  state.gitBusyLabel = label;
+  renderGit();
+}
+
+function gitBusyEnd() {
+  state.gitBusy = Math.max(0, state.gitBusy - 1);
+  if (!state.gitBusy) { state.gitBusyLabel = ''; renderGit(); }
+}
+
 async function gitPaths(op, paths) {
+  gitBusyStart(op + '…');
   try {
     const res = await ppost(`/git/${op}`, {paths});
     state.git = res.status;
     await fetchGitChanges();
-    renderGit();
     applyGitHighlights();
     applyOutlineGitMarks();
   } catch (e) { toast(`Git ${op} failed: ` + e.message, true); }
+    finally { gitBusyEnd(); }
 }
 
 async function gitDiscard(paths) {
@@ -4920,16 +4994,17 @@ async function gitDiscard(paths) {
   if (pfx) paths = paths.filter(x => x.startsWith(pfx));
   const list = paths.slice(0, 8).join('\n') + (paths.length > 8 ? '\n…' : '');
   if (!confirm(`Discard ALL uncommitted changes in ${paths.length} file(s)?\n\n${list}\n\nThis cannot be undone.`)) return;
+  gitBusyStart('discard…');
   try {
     const res = await ppost('/git/discard', {paths});
     state.git = res.status;
     await fetchGitChanges();
-    renderGit();
     applyGitHighlights();
     applyOutlineGitMarks();
     refreshDoc(); // the worktree changed underneath us
     toast(paths.length === 1 ? 'Changes discarded' : `Discarded changes in ${paths.length} files`);
   } catch (e) { toast('Discard failed: ' + e.message, true); }
+    finally { gitBusyEnd(); }
 }
 
 async function gitCommit(ta) {
@@ -4942,12 +5017,12 @@ async function gitCommit(ta) {
     if (!confirm('Nothing is staged — stage all changes and commit?')) return;
     paths = [...g.unstaged, ...g.untracked];
   }
+  gitBusyStart('commit…');
   try {
     const res = await ppost('/git/commit', {message: msg, paths});
     state.git = res.status;
     ta.value = '';
     await fetchGitChanges();
-    renderGit();
     applyGitHighlights();
     applyOutlineGitMarks();
     applyGitDiffRerender(); // HEAD moved — green/red marks must clear now
@@ -4956,11 +5031,13 @@ async function gitCommit(ta) {
     if (state.gitShowDiff) toggleDiffOnly();
     toast('Committed: ' + res.summary);
   } catch (e) { toast('Commit failed: ' + e.message, true); }
+    finally { gitBusyEnd(); }
 }
 
 async function gitPush(btn) {
   if (!state.project || state.pushing) return;
   state.pushing = true;
+  gitBusyStart('push…');
   // busy state on the clicked button; the periodic renderGit rebuilds
   // keep it via state.pushing
   if (btn) {
@@ -4981,20 +5058,21 @@ async function gitPush(btn) {
     toast(msg, true);
   } finally {
     state.pushing = false;
-    renderGit(); // restores the enabled button
+    gitBusyEnd(); // restores the enabled buttons
   }
 }
 
 async function gitInit() {
+  gitBusyStart('init…');
   try {
     const res = await ppost('/git/init', {});
     state.git = res.status;
     await fetchGitChanges();
-    renderGit();
     applyGitHighlights();
     applyOutlineGitMarks();
     toast('Git repository initialized');
   } catch (e) { toast('git init failed: ' + e.message, true); }
+    finally { gitBusyEnd(); }
 }
 
 // unified diff → colored lines; spans are display:block so backgrounds
