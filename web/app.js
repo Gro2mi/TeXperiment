@@ -6281,7 +6281,13 @@ connectWS();
   // caret directly in the command's first argument
   document.addEventListener('selectionchange', () => {
     const ref = state.inlineEdit;
-    if (!ref || !ref.ec.contains(getSelection().anchorNode)) return;
+    const sel = getSelection();
+    if (!ref || !sel.rangeCount || !ref.ec.contains(sel.anchorNode)) return;
+    // a non-collapsed selection is deliberate user intent (select-all,
+    // drag-select) — the caret tracker must never rebuild under it, or
+    // the rebuild destroys the selection and typed text prepends instead
+    // of replacing
+    if (!sel.isCollapsed) return;
     const off = ceCaretSource(ref);
     if (off === null || off === ref.lastOff) return;
     ref.lastOff = off;

@@ -290,17 +290,20 @@ surrounding code — entries move out when fixed:
 12. **Fixed in M6** (ruff adoption): loop-lambda in
     `proof.py` LanguageToolEngine.check captured the loop variable late
     (E731/B023) — rewritten as a `def` binding `_m` eagerly.
-13. Found by M5: the inline contenteditable editor's `selectionchange`
-    handler rebuilds the editor DOM (`ceRender`) when the caret moves —
-    an active selection (e.g. Ctrl+A) is sometimes clobbered by that
-    rebuild, so typed text *prepends* instead of replacing. Roughly
-    reproduced once per few attempts; matches the editor-state fix
-    cluster in the git history. The smoke suite avoids selection-based
-    editing because of it.
-14. Found by M5: two more intermittent editor-state races — the hover
-    toolbar's ✎ button click can hang on actionability forever (toolbar
-    never becomes clickable despite hover), and toggling side-by-side
-    off occasionally does not unmount the raw segments. Both fire in a
-    minority of runs; the e2e job retries once and counts them as
-    flaky. These plus #13 are good targets for a focused editor-state
-    fix pass.
+13. **Fixed** (editor pass after M5): the inline editor's
+    `selectionchange` handler rebuilt the editor DOM (`ceRender`) when
+    the caret left an active raw command — destroying any non-collapsed
+    selection (Ctrl+A, drag-select), so typed text *prepended* instead
+    of replacing. Fix: the caret tracker now returns early while the
+    selection is non-collapsed (`sel.isCollapsed` guard). Regression:
+    the E2E `select-all + type` test (red at ~1-in-4 before the fix,
+    10/10 green after in isolation).
+14. Open (editor state): intermittent commit-pipeline races remain —
+    observed signatures: the raw-column PUT occasionally never fires on
+    toggle-back, the sbs toggle-off sometimes does not unmount the raw
+    segments, one E2E run saw a view update missing after an inline
+    commit, and (once) a hover-toolbar ✎ click hung on actionability.
+    All retry-recoverable; zero hard failures across recent full-suite
+    loops. These look like `enqueueOp`/`applyDoc`/`ceRender`
+    interleavings — a focused editor-state pass (with the E2E flaky
+    counter as the progress metric) is the suggested next step.

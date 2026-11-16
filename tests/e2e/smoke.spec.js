@@ -122,6 +122,38 @@ test('undo reverts the edit in the view and on disk', async ({page}) => {
   expect(srv.readProjectFile('chapters/ch2.tex')).toBe(before);
 });
 
+test('select-all + type in the inline editor replaces the paragraph',
+  async ({page}) => {
+    await page.goto(srv.baseUrl);
+    // order-independent: ch1's first \texttt paragraph is untouched by
+    // the other tests and always provides a rendered command chip
+    const doc = await currentDoc(srv);
+    const para = doc.blocks.find(
+      b => b.file === 'chapters/ch1.tex' && b.type === 'paragraph' &&
+           b.source.includes('\\texttt{'));
+    const oldPrefix = para.source.slice(0, 18);
+    const block = page.locator(`.block[data-id="${para.id}"]`);
+    await block.dblclick();
+    const ce = block.locator('.inline-ce');
+    await ce.waitFor({state: 'visible'});
+    // deterministically enter the raw-mode state first: click right on a
+    // rendered command chip (\texttt → <code>) so the caret tracker
+    // flips it to raw; the regression (TESTING.md #13) is that a
+    // following select-all gets destroyed by the tracker's rebuild
+    await block.locator('.inline-ce code').first().click();
+    await block.locator('.inline-ce .tok-raw').waitFor({state: 'visible'});
+    await page.keyboard.press('Control+A');
+    await page.keyboard.type('Chapter one, replaced by select-all.',
+      {delay: 5});
+    await page.keyboard.press('Control+Enter');
+    await ce.waitFor({state: 'detached'});
+    await expect(page.locator('#content'))
+      .toContainText('replaced by select-all');
+    const disk = srv.readProjectFile('chapters/ch1.tex');
+    expect(disk).toContain('Chapter one, replaced by select-all.');
+    expect(disk).not.toContain(oldPrefix);
+  });
+
 test('an external file edit reloads the document over the websocket',
   async ({page}) => {
     await page.goto(srv.baseUrl);
