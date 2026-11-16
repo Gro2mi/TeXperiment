@@ -1,0 +1,17 @@
+# Test/tooling configuration only — runtime deps stay in requirements.txt.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# any new warning fails the suite — fix it or, for a third-party warning
+# we genuinely cannot fix, add a narrowly-scoped ignore with a comment
+filterwarnings = ["error"]
+
+# Lint baseline: pyflakes + pycodestyle errors + import sorting. Widen the
+# selection deliberately, not opportunistically — every rule added must
+# hold on the current tree or come with fixes in the same change.
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

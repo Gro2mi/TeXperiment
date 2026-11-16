@@ -13,6 +13,8 @@ const state = {
   edit: null,        // {id, kind, original, root, block}
   sbsFiles: new Map(), // side-by-side per-file editors {path → {ec, wrap, ...}}
   inlineEdit: null,  // in-place rendered-column editor {id, block, original, ta}
+  selBlocks: [],     // multi-selection: block ids in selection order
+  selAnchor: null,   // anchor id for shift+click ranges
   sbs: localStorage.getItem('sbs') === '1', // side-by-side mode (persisted)
   docSize: parseFloat(localStorage.getItem('doc-size')) || 17, // document font size
   browsePath: null,  // disk browser location
@@ -22,6 +24,8 @@ const state = {
   gitHl: localStorage.getItem('git-hl') !== '0',  // highlight changes (persisted)
   gitShowDiff: localStorage.getItem('git-show-diff') === '1', // persisted
   diskHl: localStorage.getItem('disk-hl') !== '0', // yellow external-change highlights (persisted)
+  gitMsgDraft: (() => { try { return sessionStorage.getItem('git-msg') || ''; }
+    catch (e) { return ''; } })(), // commit message draft (survives re-renders)
   diskAcked: false,   // 'acknowledge all' pressed for the current set
   diskAckedKeys: new Set(), // block keys acknowledged this session
   proof: {           // proofreading state
@@ -36,6 +40,7 @@ const state = {
   bib: null,         // parsed .bbl: {style, entries} — null = not loaded
   graphics: [],      // project graphics files for \includegraphics autocomplete
   graphicCache: new Map(), // \includegraphics arg → resolved rel path or null
+  dropLiveFigures: false,  // graphics changed on disk — remount all figure media
   graphicPending: new Map(), // \includegraphics arg → in-flight resolve promise
   gitDiff: {diffs: {}, ghosts: []}, // word-level diffs vs git HEAD
 };
@@ -1008,7 +1013,6 @@ function parseTabularLenient(src) {
   // tabularx / tabular* take a width argument BEFORE the column spec
   let end = readGroupAt(i);
   if (end < 0) return null;
-  const first = src.slice(i + 1, end - 1);
   if (/^(tabularx|tabular\*)$/.test(bm[1])) {
     i = end;
     while (i < src.length && src[i] === ' ') i++;
@@ -1022,7 +1026,6 @@ function parseTabularLenient(src) {
     end = readGroupAt(i);
     if (end < 0) return null;
   }
-  const colspec = src.slice(i + 1, end - 1);
   const envEnd = src.indexOf('\\end{' + bm[1] + '}', end);
   if (envEnd < 0) return null;
   let body = src.slice(end, envEnd);
@@ -1134,9 +1137,24 @@ function resolveGraphic(path) {
   if (state.graphicPending.has(path)) return state.graphicPending.get(path);
   const p = papi('/graphic?path=' + encodeURIComponent(path))
     .then(r => {
-      state.graphicCache.set(path, r.path);
+      const rel = r.path;
+      if (/\.(pdf|eps)$/i.test(rel)) {
+        // pdf/eps has no lightweight browser preview — when a png with the
+        // same name exists, resolve to THAT for display. The pdf/eps stays
+        // untouched for the LaTeX build, which keeps using the original
+        // argument. Decided here so the cache never holds the pdf value:
+        // a re-render in the twin-lookup window must not render the embed.
+        return papi('/graphic?path=' +
+            encodeURIComponent(rel.replace(/\.(pdf|eps)$/i, '.png')))
+          .then(r2 => (r2.path && !/\.(pdf|eps)$/i.test(r2.path)) ? r2.path : rel)
+          .catch(() => rel);
+      }
+      return rel;
+    })
+    .then(rel => {
+      state.graphicCache.set(path, rel);
       state.graphicPending.delete(path);
-      return r.path;
+      return rel;
     })
     .catch(() => {
       state.graphicCache.set(path, null);
@@ -1152,6 +1170,13 @@ function resolveGraphic(path) {
 // block id + includegraphics path, so a genuinely changed figure (path
 // edited) still remounts with the new source
 function harvestFigureMedia(root) {
+  // a graphics change invalidated the cache: remount every figure so the
+  // browser revalidates the (possibly changed) files instead of moving
+  // stale nodes across
+  if (state.dropLiveFigures) {
+    state.dropLiveFigures = false;
+    return new Map();
+  }
   const map = new Map();
   root.querySelectorAll('[data-figkey]').forEach(n => map.set(n.dataset.figkey, n));
   return map;
@@ -1708,7 +1733,17 @@ function renderContent() {
 function insertLine(b, hidden = false) {
   const line = el('div', 'insertline' + (hidden ? ' b-collapsed' : ''));
   line.title = 'Insert block here…';
-  line.onclick = ev => { ev.stopPropagation(); showInsertMenu(b, ev); };
+  line.onclick = ev => {
+    ev.stopPropagation();
+    // with a block selection, clicking the bar MOVES the selection here —
+    // the bar follows block b, so the landing spot is after b
+    if (state.selBlocks.length &&
+        !state.selBlocks.includes(b.id)) {
+      moveSelectedBlocks(b.id, false);
+      return;
+    }
+    showInsertMenu(b, ev);
+  };
   line.append(el('span', 'insertbtn', '+'));
   return line;
 }
@@ -1744,6 +1779,15 @@ function rawSeg(b, firstOfFile, lastOfFile) {
   seg.contentEditable = 'true';
   seg.spellcheck = false;
   seg.textContent = b.source + sepAfterBlock(b);
+  // with a block selection, ctrl+clicking a raw segment moves the whole
+  // selection to just after this block (plain clicks keep editing)
+  seg.addEventListener('click', ev => {
+    if (!ev.ctrlKey && !ev.metaKey) return;
+    if (state.selBlocks.length && !state.selBlocks.includes(b.id)) {
+      ev.preventDefault();
+      moveSelectedBlocks(b.id, false);
+    }
+  });
   wireRawSeg(seg);
   return seg;
 }
@@ -1942,7 +1986,7 @@ function attachRawAC(seg) {
     const text = seg.textContent;
     const ctx = prefixContext(text.slice(0, off));
     if (!ctx) { close(); return; }
-    let start = off;
+    let start;
     if (ctx.kind === 'cmd') {
       const m = /\\([a-zA-Z]*)$/.exec(text.slice(0, off));
       start = off - (m ? m[0].length : 0);
@@ -2185,6 +2229,7 @@ function reallyOpenInlineEdit(b, ev, sourceOverride) {
   if (state.edit) closeEditor();
   commitDirtyRawFiles();
   if (state.inlineEdit) commitInlineEdit();
+  clearBlockSelection();
   const node = $(`.block[data-id="${b.id}"]`);
   const bc = node && node.querySelector('.bcontent');
   if (!bc) return;
@@ -2684,6 +2729,80 @@ function attachAutocompleteCE(ec) {
   };
 }
 
+/* ---- multi-selection of blocks (click / ctrl+click / shift+click)
+   and moving the selection packed together ---------------------------- */
+
+function selBlockIds() {
+  return [...state.selBlocks];
+}
+
+function clearBlockSelection() {
+  state.selBlocks = [];
+  state.selAnchor = null;
+  document.querySelectorAll('.block.sel-block, .block.sel-anchor')
+    .forEach(n => n.classList.remove('sel-block', 'sel-anchor'));
+}
+
+function applySelectionClasses() {
+  document.querySelectorAll('.block').forEach(n =>
+    n.classList.toggle('sel-block', state.selBlocks.includes(n.dataset.id)));
+  document.querySelectorAll('.block.sel-anchor')
+    .forEach(n => n.classList.remove('sel-anchor'));
+  if (state.selAnchor) {
+    const n = document.querySelector(`.block[data-id="${state.selAnchor}"]`);
+    if (n) n.classList.add('sel-anchor');
+  }
+}
+
+function selectBlock(b, mode) {
+  // mode: 'set' | 'toggle' | 'range'
+  if (mode === 'toggle') {
+    if (state.selBlocks.includes(b.id)) {
+      state.selBlocks = state.selBlocks.filter(id => id !== b.id);
+    } else {
+      state.selBlocks.push(b.id);
+    }
+    state.selAnchor = b.id;
+  } else if (mode === 'range' && state.selBlocks.length &&
+             state.selAnchor) {
+    const ids = state.doc.blocks
+      .filter(x => x.file === b.file)
+      .map(x => x.id);
+    const a = ids.indexOf(state.selAnchor);
+    const c = ids.indexOf(b.id);
+    if (a < 0 || c < 0) { state.selBlocks = [b.id]; }
+    else {
+      const range = ids.slice(Math.min(a, c), Math.max(a, c) + 1);
+      // range selection replaces the selection with the full span
+      state.selBlocks = range;
+    }
+  } else {
+    state.selBlocks = [b.id];
+    state.selAnchor = b.id;
+  }
+  applySelectionClasses();
+}
+
+function moveSelectedBlocks(targetId, before) {
+  const bids = selBlockIds();
+  if (!bids.length) return;
+  if (bids.includes(targetId)) return;
+  enqueueOp(async () => {
+    try {
+      const res = await ppost('/block/move-blocks', {blocks: bids,
+        after: targetId, before});
+      applyDoc(res.doc);
+      // re-apply the selection on the moved blocks (ids are stable);
+      // applyDoc reset it as part of the rebuild
+      state.selBlocks = bids;
+      state.selAnchor = null;
+      applySelectionClasses();
+      toast(bids.length === 1 ? 'Block moved'
+        : `Moved ${bids.length} blocks`);
+    } catch (e) { toast('Move failed: ' + e.message, true); }
+  });
+}
+
 function blockEl(b, hidden = false) {
   const node = el('div', 'block b-' + b.type + (hidden ? ' b-collapsed' : ''));
   node.dataset.id = b.id;
@@ -2693,10 +2812,10 @@ function blockEl(b, hidden = false) {
   if (isBlankComment(b)) node.classList.add('b-hidden');
   node.append(el('div', 'bcontent', renderBlockContent(b)));
   node.append(buildTools(b));
-  const stageBtn = stageBlockButton(b);
-  if (stageBtn) {
-    stageBtn.classList.add('stage-in-block');
-    node.append(stageBtn);
+  const stageBtns = stageBlockButton(b);
+  if (stageBtns) {
+    stageBtns.classList.add('stage-in-block');
+    node.append(stageBtns);
   }
   // grab handle on the left edge — mousedown starts a pointer-tracked drag
   const grip = el('div', 'grip', '⠿');
@@ -2715,7 +2834,6 @@ function blockEl(b, hidden = false) {
   }
   if (b.type === 'section') {
     // chevron toggles collapsing of everything in this section
-    const collapsed = state.collapsed.has(b.id);
     node.addEventListener('click', ev => {
       if (ev.target.closest('.collapsebtn')) {
         ev.stopPropagation();
@@ -2723,6 +2841,27 @@ function blockEl(b, hidden = false) {
       }
     });
   }
+  let downXY = null;
+  node.addEventListener('mousedown', ev => {
+    downXY = [ev.clientX, ev.clientY];
+  });
+  node.addEventListener('click', ev => {
+    // a plain click selects the block; ctrl+click toggles single additional
+    // blocks, shift+click selects the range from the anchor. A drag (text
+    // marking) is not a click-selection: the pointer must not have moved.
+    if (ev.target.closest('.editor') || ev.target.closest('.inline-ce') ||
+        ev.target.closest('.btools') || ev.target.closest('.grip') ||
+        ev.target.closest('a') || ev.target.closest('.stage-block-wrap') ||
+        ev.target.closest('.sbsfileseg') ||
+        ev.target.closest('.insertline')) return;
+    if (downXY && Math.hypot(ev.clientX - downXY[0],
+                             ev.clientY - downXY[1]) > 4) return;
+    downXY = null;
+    ev.preventDefault();
+    const mode = ev.shiftKey ? 'range'
+      : (ev.ctrlKey || ev.metaKey) ? 'toggle' : 'set';
+    selectBlock(b, mode);
+  });
   if (EDITABLE.has(b.type)) {
     // double-click edits; single click stays free for text marking.
     // in side-by-side mode prose blocks edit in place, styled as rendered
@@ -2730,7 +2869,7 @@ function blockEl(b, hidden = false) {
       if (ev.target.closest('.editor') || ev.target.closest('.inline-ce') ||
           ev.target.closest('.btools') ||
           ev.target.closest('.grip') || ev.target.closest('a')) return;
-      if (state.sbs && (b.type === 'paragraph' || b.type === 'comment')) {
+      if (b.type === 'paragraph' || b.type === 'comment') {
         window.__dlog = (window.__dlog || []);
         window.__dlog.push('sbs-open ' + b.id);
         openInlineEdit(b, ev);
@@ -2978,6 +3117,7 @@ function openEditor(b, freshOpts) {
 function reallyOpenEditor(b, freshOpts) {
   if (state.inlineEdit) commitInlineEdit(); // one active editor at a time
   commitDirtyRawFiles();
+  clearBlockSelection();
   if (state.edit) {
     if (state.edit.id === b.id) return;
     closeEditor();
@@ -3173,7 +3313,7 @@ const AC_UNITS = [
   ['N', 'newton — force'], ['Pa', 'pascal — pressure'], ['hPa', 'hectopascal'], ['kPa', 'kilopascal'],
   ['J', 'joule — energy'], ['kJ', 'kilojoule'], ['kWh', 'kilowatt hour'], ['eV', 'electronvolt'],
   ['W', 'watt — power'], ['kW', 'kilowatt'], ['MW', 'megawatt'], ['Hz', 'hertz — frequency'],
-  ['C', 'coulomb — charge'], ['V', 'volt — voltage'], ['\Omega', 'ohm — resistance'],
+  ['C', 'coulomb — charge'], ['V', 'volt — voltage'], ['\\Omega', 'ohm — resistance'],
   ['T', 'tesla — flux density'], ['Wb', 'weber'], ['H', 'henry — inductance'],
   ['lm', 'lumen'], ['lx', 'lux'], ['dB', 'decibel'], ['%', 'percent'],
 ].map(([u, d]) => ({u, d}));
@@ -3403,7 +3543,7 @@ function acSuggestions(kind, typed) {
   } else if (kind === 'graphic') {
     items = (state.graphics || []).map(f => {
       const ix = f.lastIndexOf('/');
-      return {insert: f, title: f.slice(ix + 1), sub: f.slice(0, ix) || 'project root'};
+      return {insert: f, title: f.slice(ix + 1), sub: ix > 0 ? f.slice(0, ix) : 'project root'};
     });
   } else {
     const typeNames = {math: 'equation', figure: 'figure', table: 'table'};
@@ -3465,7 +3605,7 @@ function attachAutocomplete(ta) {
     if (!it) { close(); return; }
     const pos = ta.selectionStart;
     const c = acContext(ta);
-    let start = pos;
+    let start;
     if (c && c.kind === 'cmd') {
       start = c.start; // replace the whole partial command incl. backslash
     } else {
@@ -3783,7 +3923,7 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
     delCol: c => {
       if (ncols() <= 1) return;
       model.rows.forEach(row => {
-        const {i, mid} = cellIndexForCol(row, c);
+        const {i} = cellIndexForCol(row, c);
         const cell = row.cells[i];
         if (cell && cell.mc && cell.mc.n > 1) {
           cell.mc.n--;
@@ -3815,12 +3955,6 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
   const rulesAt = bIdx => model.rules.filter(r => r.before === bIdx);
   const defaultKind = bIdx =>
     bIdx === 0 ? 'toprule' : (bIdx === model.rows.length ? 'bottomrule' : 'midrule');
-  const cycleKind = (bIdx, kind) => {
-    if (kind === 'cline' || kind === 'cmidrule') return defaultKind(bIdx);
-    if (bIdx === 0) return kind === 'toprule' ? 'hline' : 'toprule';
-    if (bIdx === model.rows.length) return kind === 'bottomrule' ? 'hline' : 'bottomrule';
-    return kind === 'midrule' ? 'hline' : 'midrule';
-  };
   const setRule = (bIdx, kind) => {
     model.rules = model.rules.filter(r => r.before !== bIdx);
     if (kind) model.rules.push({before: bIdx, kind, arg: ''});
@@ -4661,12 +4795,6 @@ function applyGitDiffRerender() {
   }
 }
 
-function toggleDiskHl() {
-  state.diskHl = !state.diskHl;
-  localStorage.setItem('disk-hl', state.diskHl ? '1' : '0');
-  renderContentPreservingScroll();
-}
-
 function renderContentPreservingScroll() {
   const content = $('#content');
   const firstVisible = [...document.querySelectorAll('.block')]
@@ -4756,27 +4884,30 @@ function toggleDiffOnly() {
 
 function renderGit() {
   const panel = $('#gitpanel');
-  // the panel rebuilds on every status refresh — carry the commit message
-  // (with focus and caret) across, so a background refresh can't wipe
-  // what is being typed
+  // the commit message draft lives in state (+ sessionStorage), so failed
+  // commits, busy renders and even a page reload cannot lose it; only a
+  // successful commit clears it
   const prevMsg = panel.querySelector('.gitmsg');
-  const keep = prevMsg ? {value: prevMsg.value,
-    focused: document.activeElement === prevMsg,
+  const keep = prevMsg ? {focused: document.activeElement === prevMsg,
     s: prevMsg.selectionStart, e: prevMsg.selectionEnd} : null;
+  // git work in flight: the panel renders normally (controls disabled)
+  // and the spinner floats over the whole section — no layout jump
+  const showBusyOverlay = () => {
+    if (!state.gitBusy) return;
+    ($('#gitSection') || panel).append(el('div', 'gitbusy',
+      `<span class="spin"></span> Git ${state.gitBusyLabel || 'working'}…`));
+  };
   panel.innerHTML = '';
+  // drop any busy overlay from a previous render (it lives on the section,
+  // outside the panel that innerHTML just cleared)
+  const sec0 = $('#gitSection');
+  if (sec0) sec0.querySelectorAll('.gitbusy').forEach(n => n.remove());
   $('#gitHead').classList.toggle('hidden', !state.project);
   if (!state.project) return;
   const g = state.git;
   if (!g) {
     panel.append(el('div', 'gitmuted', 'checking…'));
-    return;
-  }
-  // git work in flight: banner + all controls disabled
-  if (state.gitBusy) {
-    const busy = el('div', 'gitbusy',
-      `<span class="spin"></span> Git ${state.gitBusyLabel || 'working'}…`);
-    panel.append(busy);
-    $('#gitHead').classList.remove('hidden');
+    showBusyOverlay();
     return;
   }
   if (!g.repo) {
@@ -4784,6 +4915,7 @@ function renderGit() {
     const btn = el('button', 'edbtn gitinit', 'Initialize repository');
     btn.onclick = gitInit;
     panel.append(btn);
+    showBusyOverlay();
     return;
   }
 
@@ -4817,7 +4949,6 @@ function renderGit() {
   views.append(hlBtn, diffBtn, diskBtn);
   panel.append(views);
 
-  const dis = state.gitBusy ? ' disabled' : '';
   if (g.staged.length) panel.append(gitFileGroup('Staged changes', g.staged, 'staged', state.gitBusy));
   if (g.unstaged.length) panel.append(gitFileGroup('Changes', g.unstaged, 'unstaged', state.gitBusy));
   if (g.untracked.length) panel.append(gitFileGroup('Untracked', g.untracked, 'untracked', state.gitBusy));
@@ -4829,6 +4960,11 @@ function renderGit() {
   const ta = el('textarea', 'gitmsg');
   ta.placeholder = 'Commit message (Ctrl+Enter to commit on all files)';
   ta.rows = 3;
+  ta.value = state.gitMsgDraft;
+  ta.addEventListener('input', () => {
+    state.gitMsgDraft = ta.value;
+    try { sessionStorage.setItem('git-msg', state.gitMsgDraft); } catch (e) {}
+  });
   const bar = el('div', 'gitbar');
   const commitBtn = el('button', 'edbtn primary', '✓ Commit');
   const pushBtn = el('button', 'edbtn', '⇅ Push');
@@ -4853,13 +4989,11 @@ function renderGit() {
       gitCommit(ta);
     }
   });
-  if (keep && keep.value) {
-    ta.value = keep.value;
-    if (keep.focused) {
-      ta.focus();
-      ta.setSelectionRange(keep.s, keep.e);
-    }
+  if (keep && keep.focused) {
+    ta.focus();
+    ta.setSelectionRange(keep.s, keep.e);
   }
+  showBusyOverlay();
 }
 
 function gitFileGroup(title, paths, kind, busy) {
@@ -4953,11 +5087,31 @@ async function toggleBlockStage(b) {
 function stageBlockButton(b) {
   const dd = state.gitDiff && state.gitDiff.diffs[b.id];
   if (!dd || !state.git || !state.git.repo) return null;
+  const wrap = el('span', 'stage-block-wrap');
   const btn = el('button', 'btools-btn stage-block' + (dd.staged ? ' staged' : ''), '⇅');
   btn.title = dd.staged ? 'Unstage this block’s change'
     : 'Stage this block’s change';
   btn.onclick = ev => { ev.stopPropagation(); toggleBlockStage(b); };
-  return btn;
+  wrap.append(btn);
+  // discard: revert this block to its committed content
+  const dis = el('button', 'btools-btn stage-block discard-block', '↩');
+  dis.title = 'Discard this block’s change (back to the last commit)';
+  dis.onclick = ev => { ev.stopPropagation(); discardBlockChange(b); };
+  wrap.append(dis);
+  return wrap;
+}
+
+async function discardBlockChange(b) {
+  if (!confirm('Discard this block\u2019s change?\n\nIt reverts to the committed content. This cannot be undone.')) return;
+  try {
+    const res = await ppost('/git/discard-block', {message: b.id});
+    if (res.ok === false) { toast('Nothing to discard'); }
+    else {
+      applyDoc(res.doc);
+      toast('Block change discarded');
+    }
+    await refreshGit();
+  } catch (e) { toast('Discard failed: ' + e.message, true); }
 }
 
 // mark git work as in-flight: renderGit disables all controls and shows
@@ -5022,6 +5176,8 @@ async function gitCommit(ta) {
     const res = await ppost('/git/commit', {message: msg, paths});
     state.git = res.status;
     ta.value = '';
+    state.gitMsgDraft = ''; // only success clears the draft
+    try { sessionStorage.removeItem('git-msg'); } catch (e) {}
     await fetchGitChanges();
     applyGitHighlights();
     applyOutlineGitMarks();
@@ -5099,10 +5255,38 @@ async function openGitDiffAll(staged) {
 
 async function openGitDiff(path, staged = false) {
   return openGitDiffModal((staged ? 'Staged changes — ' : 'Changes — ') + path,
-    `/git/diff?path=${encodeURIComponent(path)}&staged=${staged ? 1 : 0}`);
+    `/git/diff?path=${encodeURIComponent(path)}&staged=${staged ? 1 : 0}`, path);
 }
 
-async function openGitDiffModal(title, url) {
+// commit the COMPLETE current state of one file straight from its diff
+// view: all of the file's worktree changes, nothing else
+async function commitWholeFile(path) {
+  const msg = (state.gitMsgDraft || '').trim();
+  if (!msg) {
+    toast('Enter a commit message first (Source Control panel)', true);
+    return;
+  }
+  gitBusyStart('commit…');
+  try {
+    const res = await ppost('/git/commit-file', {path, message: msg});
+    state.git = res.status;
+    state.gitMsgDraft = '';
+    try { sessionStorage.removeItem('git-msg'); } catch (e) {}
+    renderGit();
+    await fetchGitChanges();
+    applyGitHighlights();
+    applyOutlineGitMarks();
+    applyGitDiffRerender(); // HEAD moved — green/red marks must clear now
+    toast('Committed file: ' + res.summary);
+    const modal = $('#gitmodal');
+    modal.classList.add('hidden');
+    modal.innerHTML = '';
+    if (state.gitShowDiff) toggleDiffOnly();
+  } catch (e) { toast('Commit failed: ' + e.message, true); }
+    finally { gitBusyEnd(); }
+}
+
+async function openGitDiffModal(title, url, path) {
   const modal = $('#gitmodal');
   modal.classList.remove('hidden');
   modal.innerHTML = '';
@@ -5111,6 +5295,13 @@ async function openGitDiffModal(title, url) {
   const pre = el('pre', 'gitdiffpre', 'loading…');
   wrap.append(pre);
   const bar = el('div', 'edbar');
+  if (path) {
+    const cbtn = el('button', 'edbtn primary', '✓ Commit file');
+    cbtn.title = 'Commit the complete current state of this file ' +
+      '(all its changes, using the message from the Source Control panel)';
+    cbtn.onclick = () => commitWholeFile(path);
+    bar.append(cbtn);
+  }
   const closeBtn = el('button', 'edbtn', 'Close');
   bar.append(el('span', 'spacer'), closeBtn);
   wrap.append(bar);
@@ -5803,6 +5994,9 @@ function applyDoc(doc, fromDisk = false) {
 
   state.doc = doc;
   pruneProofIssues(doc); // drop issues whose block text changed
+  // a selection across a doc change can be stale — clear it (ids shift)
+  state.selBlocks = [];
+  state.selAnchor = null;
   renderAll();
 
   // tracked raw files re-register with their texts and caret restored
@@ -5874,26 +6068,54 @@ async function loadGraphics() {
   } catch (e) { state.graphics = []; }
 }
 
+// figure files changed on disk (watcher): refresh the autocomplete list,
+// invalidate the resolver cache (paths may resolve differently now) and
+// rerender so figures show the current files. Harvested live media is
+// dropped on purpose — a same-path figure may hold new bytes, so the
+// elements must remount and revalidate against the server's etags.
+async function refreshGraphics() {
+  state.dropLiveFigures = true;
+  state.graphicCache.clear();
+  state.graphicPending.clear();
+  await loadGraphics();
+  if (state.doc) rerenderContentPreservingScroll();
+}
+
+function discardStaleEditState() {
+  // after a reconnect the in-memory doc may be stale — unsaved editor
+  // text and raw-file edits belong to that stale doc and must never be
+  // saved over the newer disk state (that is how edits get lost). Drop
+  // them; the caller reloads the document right after.
+  if (state.edit) closeEditor();
+  if (state.inlineEdit) cancelInlineEdit();
+  if (state.sbsFiles && state.sbsFiles.size) state.sbsFiles.clear();
+  clearBlockSelection();
+}
+
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   state.ws = ws;
   ws.onopen = () => {
     setConn(true);
-    // page opened (or stayed open) while the server was down: the socket
-    // reconnects, but nothing ever loaded the projects/content. Pull the
-    // full state once the server answers; also covers server restarts,
-    // where project ids change.
+    // ALWAYS pull the full state on (re)connect: the page may have sat
+    // open for days while files changed behind its back (server restart,
+    // external editor, git operations). Its in-memory doc can be stale —
+    // saving against it overwrites newer disk content, which is how edits
+    // get lost. Reload everything, every time, and drop unsaved editor
+    // state that belonged to the stale document.
     fetch('/api/projects').then(r => r.ok ? r.json() : null).then(projects => {
       if (!Array.isArray(projects)) return;
-      if (!state.doc || !projects.some(p => p.id === state.project)) {
-        state.projects = projects;
-        refreshProjects().then(() => {
-          refreshGit();
-          loadProofConfig();
-          refreshBib();
-        });
-      }
+      state.projects = projects;
+      // refreshProjects re-picks the current project (ids can change
+      // across a server restart) and reloads the document itself
+      refreshProjects().then(() => {
+        discardStaleEditState();
+        refreshGit();
+        loadProofConfig();
+        refreshBib();
+        loadGraphics();
+      }).catch(() => {});
     }).catch(() => {});
   };
   ws.onclose = () => {
@@ -5908,6 +6130,8 @@ function connectWS() {
       applyDoc(msg.doc, msg.self !== true);
     }
     if (msg.type === 'bib' && msg.project === state.project) refreshBib();
+    if (msg.type === 'graphics' && msg.project === state.project)
+      refreshGraphics();
   };
 }
 
@@ -5978,6 +6202,7 @@ function watchMathLibs() {
 connectWS();
 
 (async () => {
+  try {
   $('#projadd').addEventListener('click', addProject);
   wireMathKeyboard();
   // collapsible sidebar groups (remembered across sessions)
@@ -6102,6 +6327,23 @@ connectWS();
       }
     }
   }, true);
+  // clicking the page background (not a block, not UI) clears the block
+  // selection; Escape does the same unless an editor/popup owns the key
+  document.addEventListener('mousedown', e => {
+    if (!state.selBlocks.length) return;
+    if (e.target.closest('.block') || e.target.closest('#sidebar') ||
+        e.target.closest('.insertline') || e.target.closest('.editor') ||
+        e.target.closest('.inline-ce') || e.target.closest('.acpopup') ||
+        e.target.closest('header') ||
+        e.target.closest('button') || e.target.closest('select')) return;
+    clearBlockSelection();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape' || !state.selBlocks.length) return;
+    if (state.inlineEdit || state.edit ||
+        document.querySelector('.acpopup')) return;
+    clearBlockSelection();
+  });
   // raster figures whose literal path 404s (file moved, graphicspath use)
   // resolve via the server and swap the src; pdf/eps figures never get a
   // doomed src (figureMediaHtml resolves first), so nothing to do here
@@ -6119,4 +6361,13 @@ connectWS();
     });
   }, true);
   syncHistoryButtons();
+  } catch (err) {
+    console.error('init failed:', err);
+    window.__initError = String(err && err.stack || err);
+  }
+  // test/debug access to the multi-selection and move machinery —
+  // exposed even when init fails partway, for debugging
+  window.__sel = {selectBlock, moveSelectedBlocks, clearBlockSelection,
+    applySelectionClasses, selBlockIds,
+    renderContentPreservingScroll, state};
 })();

@@ -1,5 +1,9 @@
 .zcode/
 __pycache__/
+node_modules/
+.pytest_cache/
+test-results/
+playwright-report/
 *.tex.bak
 *.aux
 *.fls

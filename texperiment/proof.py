@@ -262,8 +262,10 @@ class LanguageToolEngine:
         lt = self._get(lang)
         issues = []
         for m in lt.check(text):
-            # attribute names differ across language_tool_python versions
-            get = lambda a, b: getattr(m, a, None) or getattr(m, b)
+            # attribute names differ across language_tool_python versions;
+            # _m binds the loop variable now (a lambda would capture it late)
+            def get(a, b, _m=m):
+                return getattr(_m, a, None) or getattr(_m, b)
             issues.append({
                 'offset': m.offset,
                 'length': get('error_length', 'errorLength'),

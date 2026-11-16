@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -15,16 +16,21 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .parser import parse_file
-from .resolver import read_text_preserve, resolve_files
-from .storage import ConflictError, FileStore, patch
 from . import bibparse, gitops, proof, watcher
 from .gitops import GitError
+from .parser import parse_file
 from .proof import ProofError
+from .resolver import read_text_preserve, resolve_files
+from .storage import ConflictError, FileStore, patch
 
 WEB_DIR = Path(__file__).resolve().parent.parent / 'web'
 
 NON_EDITABLE = ('preamble', 'enddoc')
+
+IMG_EXTS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp')
+# LaTeX also happily includes vector formats the browser can't show in
+# an <img> — resolve them too, the frontend decides how to display
+GRAPHICS_EXTS = IMG_EXTS + ('.pdf', '.eps')
 
 # per-port project persistence: ~/.texperiment/projects.json
 CONFIG_DIR = Path.home() / '.texperiment'
@@ -80,14 +86,34 @@ class Store:
         with self.lock:
             files = resolve_files(self.main_path)
             blocks, fentries = [], []
+            # keep ids attached to CONTENT across re-parses: a block whose
+            # file+source matches a previous block reuses its id, so moving
+            # a block never re-binds its id to a neighbour. Duplicate sources
+            # match in document order; changed/new content falls back to the
+            # positional id.
+            prev = []
+            if getattr(self, 'doc', None):
+                prev = [(b['file'], gitops._norm_src(b['source']), b['id'])
+                        for b in self.doc['blocks']]
+            taken = set()
             for fi, fp in enumerate(files):
                 text, enc = read_text_preserve(fp)
                 rel = fp.relative_to(self.root).as_posix()
-                # stable ids: same document structure → same ids, so a
-                # re-parse never invalidates ids the UI is still using
                 for bi, (typ, s, e, meta) in enumerate(
                         parse_file(text, is_main=(fp == self.main_path))):
-                    b = {'id': f'f{fi}b{bi}', 'file': rel, 'type': typ,
+                    src = gitops._norm_src(text[s:e])
+                    old = next((pid for pf, ps, pid in prev
+                                if pf == rel and ps == src and pid not in taken),
+                               None)
+                    bid = old
+                    if not bid:
+                        bid = f'f{fi}b{bi}'
+                        n = 0
+                        while bid in taken:  # rare: structural change left
+                            n += 1           # the positional id already used
+                            bid = f'f{fi}b{bi}x{n}'
+                    taken.add(bid)
+                    b = {'id': bid, 'file': rel, 'type': typ,
                          'start': s, 'end': e, 'source': text[s:e]}
                     if meta:
                         b['meta'] = meta
@@ -260,6 +286,73 @@ class Store:
             nt = lead + ''.join(s + sep for s, sep in zip(srcs, seps)) + trail
             self._write_and_rebuild(b['file'], nt, 'move block')
 
+    def op_move_blocks(self, bids, after_id, before=False):
+        """Move the given blocks (packed together, in their current
+        relative order) to a new position: after `after_id` — or before
+        it when `before` is true. Non-selected blocks in between are
+        skipped and keep their position."""
+        if not bids:
+            raise ValueError('no blocks selected')
+        with self.lock:
+            blocks = self.doc['blocks']
+            moving = [b for b in blocks if b['id'] in bids]
+            if len(moving) != len(bids):
+                raise ValueError('unknown block in selection')
+            files = {b['file'] for b in moving}
+            if len(files) > 1:
+                raise ValueError(
+                    'selected blocks span several files and cannot be '
+                    'moved together')
+            if any(b['type'] in NON_EDITABLE for b in moving):
+                raise ValueError('cannot move a preamble/enddoc block')
+            b0 = moving[0]
+            same = [x for x in blocks if x['file'] == b0['file']]
+            sel = set(bids)
+            # selected blocks in their current order
+            moving_in_order = [x for x in same if x['id'] in sel]
+            # the reference block anchors the landing position; it must be
+            # a non-selected block in the same file
+            ref = next((x for x in same if x['id'] == after_id), None)
+            if ref is None:
+                raise ValueError('reference block not found')
+            if ref['id'] in sel:
+                raise ValueError('reference block is part of the selection')
+
+            # remove moving blocks from the file flow, keeping everything
+            # else in order
+            rest = [x for x in same if x['id'] not in sel]
+            ri = next(i for i, x in enumerate(rest) if x['id'] == after_id)
+            # insertion index: after ref → ri+1; before ref → ri
+            insert_at = ri + (0 if before else 1)
+            # the landing slot must stay inside the document body: before
+            # the preamble or after \end{document} would corrupt the file.
+            # before \end{document} is fine — that is the last body slot.
+            first_body = next(
+                (i for i, x in enumerate(rest)
+                 if x['type'] not in NON_EDITABLE), None)
+            if first_body is None:
+                raise ValueError('no editable blocks in this file')
+            if insert_at < first_body:
+                raise ValueError('cannot move before the preamble')
+            if (rest[-1]['type'] in NON_EDITABLE and
+                    insert_at >= len(rest)):
+                raise ValueError('cannot move after the end-document block')
+            new = rest[:insert_at] + moving_in_order + rest[insert_at:]
+            if gitops._norm_src(
+                    ''.join(x['source'] for x in new)) == \
+                    gitops._norm_src(''.join(x['source'] for x in same)):
+                return  # nothing would change
+
+            text, _ = self._read(b0['file'])
+            lead = text[:same[0]['start']]
+            trail = text[same[-1]['end']:]
+            seps = [text[same[k]['end']:
+                         (same[k + 1]['start'] if k + 1 < len(same) else len(text))]
+                    for k in range(len(same))]
+            srcs = [x['source'] for x in new]
+            nt = lead + ''.join(s + sep for s, sep in zip(srcs, seps)) + trail
+            self._write_and_rebuild(b0['file'], nt, 'move blocks')
+
     def op_insert(self, after_id, source):
         with self.lock:
             b = self._block(after_id)
@@ -367,6 +460,12 @@ class MoveBody(BaseModel):
     positions: int = 1
 
 
+class MoveBlocksBody(BaseModel):
+    blocks: list[str]
+    after: str
+    before: bool = False
+
+
 class InsertBody(BaseModel):
     after: str
     source: str
@@ -388,6 +487,11 @@ class GitPathsBody(BaseModel):
 class GitCommitBody(BaseModel):
     message: str
     paths: list[str] | None = None
+
+
+class GitCommitFileBody(BaseModel):
+    path: str
+    message: str
 
 
 class ProofCheckBody(BaseModel):
@@ -469,7 +573,17 @@ def _tex_plain(s):
 
 
 def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
-    app = FastAPI(title='texperiment')
+    # runs on app startup (uvicorn / TestClient context manager): grab the
+    # event loop for broadcasts and start the file watchers
+    @asynccontextmanager
+    async def _lifespan(_app):
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        for proj in projects.values():
+            watch_project(proj)
+        yield
+
+    app = FastAPI(title='texperiment', lifespan=_lifespan)
     projects = {}          # pid -> Project
     clients = set()        # websockets
     loop = None
@@ -544,6 +658,17 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         # .bib edits (autocomplete source) and .bbl rewrites (bibtex ran)
         watcher.start_watcher(proj.store.root, should_process, on_bib_change,
                               extensions=('.bib', '.bbl'))
+
+        def on_graphic_change():
+            # figure files added/changed/removed — no LaTeX run, no doc
+            # rebuild; the client refetches /graphics for the
+            # \includegraphics autocomplete and re-resolves its figure
+            # cache when it receives this
+            broadcast({'type': 'graphics', 'project': proj.id})
+
+        watcher.start_watcher(proj.store.root, should_process,
+                              on_graphic_change, extensions=GRAPHICS_EXTS,
+                              watch_deletes=True)
 
     def _run(op, *args):
         try:
@@ -629,6 +754,12 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         _run(get_project(pid).store.op_move, bid, body.direction, body.positions)
         return {'ok': True, 'doc': get_project(pid).store.doc}
 
+    @app.post('/api/project/{pid}/block/move-blocks')
+    def move_blocks_route(pid: str, body: MoveBlocksBody):
+        proj = get_project(pid)
+        _run(proj.store.op_move_blocks, body.blocks, body.after, body.before)
+        return {'ok': True, 'doc': get_project(pid).store.doc}
+
     @app.post('/api/project/{pid}/block/insert')
     def insert_block(pid: str, body: InsertBody):
         new_id = _run(get_project(pid).store.op_insert, body.after, body.source)
@@ -708,6 +839,22 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         staged = _run(gitops.unstage_block, proj.store, body.message)
         return {'ok': True, 'staged': staged}
 
+    @app.post('/api/project/{pid}/git/discard-block')
+    def git_discard_block_route(pid: str, body: GitCommitBody):
+        proj = get_project(pid)
+        got = _run(gitops.discard_block, proj.store, body.message)
+        if not got:
+            return {'ok': False}
+        rel, content = got
+        # raw_put: worktree write + rebuild + undo history; index was
+        # already synced by discard_block
+        _run(proj.store.raw_put, rel, content)
+        # other clients see this as a worktree change; the initiating
+        # client applies the POST response itself
+        broadcast({'type': 'reload', 'project': pid,
+                   'doc': proj.store.doc, 'self': True})
+        return {'ok': True, 'doc': proj.store.doc}
+
     @app.post('/api/project/{pid}/git/stage')
     def git_stage_route(pid: str, body: GitPathsBody):
         _run(gitops.stage, get_project(pid).store.root, body.paths)
@@ -737,6 +884,16 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
                        body.message.strip(), body.paths)
         return {'ok': True, 'summary': summary,
                 'status': _git_status_payload(get_project(pid))}
+
+    @app.post('/api/project/{pid}/git/commit-file')
+    def git_commit_file_route(pid: str, body: GitCommitFileBody):
+        if not body.message.strip():
+            raise HTTPException(400, 'commit message is empty')
+        proj = get_project(pid)
+        summary = _run(gitops.commit_file, proj.store.root,
+                       body.path, body.message.strip())
+        return {'ok': True, 'summary': summary,
+                'status': _git_status_payload(proj)}
 
     @app.post('/api/project/{pid}/git/push')
     def git_push_route(pid: str):
@@ -999,11 +1156,6 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
             return Response(status_code=304, headers=headers)
         return FileResponse(p, headers=headers)
 
-    IMG_EXTS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp')
-    # LaTeX also happily includes vector formats the browser can't show in
-    # an <img> — resolve them too, the frontend decides how to display
-    GRAPHICS_EXTS = IMG_EXTS + ('.pdf', '.eps')
-
     def _graphicspath_dirs(proj):
         """Dirs declared via \\graphicspath{{dir/}{dir2/}} in the document."""
         out = []
@@ -1083,13 +1235,6 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
             clients.discard(ws)
         except Exception:
             clients.discard(ws)
-
-    @app.on_event('startup')
-    async def _startup():
-        nonlocal loop
-        loop = asyncio.get_running_loop()
-        for proj in projects.values():
-            watch_project(proj)
 
     # dev-friendly caching: browsers must revalidate the frontend assets
     # (etag), otherwise code changes need a hard reload to take effect

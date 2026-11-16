@@ -8,7 +8,6 @@ import difflib
 import re
 import subprocess
 import threading
-from pathlib import Path
 
 from .parser import parse_file
 
@@ -175,6 +174,16 @@ def commit(root, message, paths=None):
     if paths:
         _run(root, 'add', '--', *paths)
     _run(root, 'commit', '-m', message)
+    out = _run(root, 'log', '-1', '--format=%h %s')
+    return out.strip()
+
+
+def commit_file(root, path, message):
+    """Commit the COMPLETE current state of one file — all of its worktree
+    changes at once (the diff-view 'Commit file' button). Other staged or
+    changed files are left alone: the commit is limited to this path."""
+    _run(root, 'add', '--', path)
+    _run(root, 'commit', '-m', message, '--', path)
     out = _run(root, 'log', '-1', '--format=%h %s')
     return out.strip()
 
@@ -560,6 +569,22 @@ def stage_block(store, block_id):
         return False
     _stage_blob(store, rel, out)
     return True
+
+
+def discard_block(store, block_id):
+    """Revert exactly this block's change everywhere: worktree and index
+    go back to HEAD for this block (a new block disappears). The change
+    is gone entirely — staged or not. Returns (rel, content) for the
+    caller to write, or None when nothing would change."""
+    blk = next((b for b in store.doc['blocks'] if b['id'] == block_id), None)
+    if blk is None:
+        raise ValueError('block not found')
+    rel = blk['file']
+    out = _block_stage_content(store, rel, block_id, 'head')
+    if out is None:
+        return None
+    _stage_blob(store, rel, out)  # index follows HEAD for this block
+    return rel, out
 
 
 def unstage_block(store, block_id):

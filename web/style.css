@@ -17,7 +17,8 @@
   --panel-line: #343a44;  /* borders on paper */
   --muted: #8a919d;
   --hover-bg: #2a313b;    /* block / item hover on paper */
-  --edit-bg: #262c36;     /* open editor tint */
+  --edit-bg: #1e3b38;     /* open editor tint (teal — selection is blue) */
+  --edit-border: #3f7e74;
   --soft-bg: #262b33;     /* preamble cards etc. */
   --soft-ink: #9aa2ae;
   --chip-bg: #2a313b;     /* command chips on paper */
@@ -51,7 +52,8 @@ html[data-theme='light'] {
   --panel-line: #e3e3dc;
   --muted: #767c86;
   --hover-bg: #f6f9ff;
-  --edit-bg: #fffdf2;
+  --edit-bg: #e8f7f4;
+  --edit-border: #82c7bb;
   --soft-bg: #f4f4ef;
   --soft-ink: #666;
   --chip-bg: #eef1f5;
@@ -160,7 +162,7 @@ body {
 /* blocks */
 .block { position: relative; padding: 2px 8px; margin: 2px -8px; border-radius: 4px; }
 .block:hover { background: var(--hover-bg); outline: 1px solid var(--panel-line); }
-.block.editing { background: var(--edit-bg); outline: 2px solid var(--accent); }
+.block.editing { background: var(--edit-bg); outline: 2px solid var(--edit-border); }
 .block.stale { outline: 2px dashed var(--err); }
 
 .b-preamble {
@@ -975,14 +977,22 @@ tr.rulegap td:hover .ruleadd { display: inline; }
   margin: 0; height: 16px; opacity: 0; pointer-events: none;
 }
 .sbsl:hover .insertline { opacity: 1; pointer-events: auto; }
-/* git busy: banner shown while stage/commit/push/etc. run in flight */
+/* git busy: spinner floats over the whole Source Control section — the
+   panel keeps its size, so the sidebar does not jump around */
+#gitSection { position: relative; }
 .gitbusy {
-  display: flex; align-items: center; gap: 8px;
-  background: var(--soft-bg); border: 1px solid var(--panel-line);
-  border-radius: 5px; padding: 6px 10px; margin: 4px 0;
-  font-size: 12px; color: var(--panel-ink);
+  position: absolute; inset: 0; z-index: 5;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--side);
+  border-radius: 5px;
+  font-size: 12px; color: var(--side-ink);
 }
 .gbtn:disabled, .gitgrouphead .gbtn:disabled { opacity: .4; cursor: default; }
 /* section headings carry their own top margin — offset the raw text to
    match the rendered heading line */
 .sbsrow:has(.b-section) .sbsfileseg { padding-top: 29px; }
+/* multi-selection of blocks */
+.block.sel-block { background: var(--sel-bg); }
+.block.sel-block.sel-anchor { outline: 1px solid var(--toggled-border); }
+.insertline.move-target { background: var(--toggled-bg); }
+.insertline.move-target .insertbtn { opacity: 1; color: var(--accent); }
