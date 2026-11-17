@@ -298,16 +298,17 @@ surrounding code — entries move out when fixed:
     selection is non-collapsed (`sel.isCollapsed` guard). Regression:
     the E2E `select-all + type` test (red at ~1-in-4 before the fix,
     10/10 green after in isolation).
-14. Open (editor state): intermittent commit-pipeline races remain —
-    observed signatures: the raw-column PUT occasionally never fires on
-    toggle-back, the sbs toggle-off sometimes does not unmount the raw
-    segments, one E2E run saw a view update missing after an inline
-    commit, and (once) a hover-toolbar ✎ click hung on actionability.
-    CI (slower than local) also exposed element churn: clicking inside
-    the inline editor while the caret tracker rebuilds its DOM detaches
-    the click target in a retry loop. The smoke suite now avoids
-    interacting mid-rebuild (settle beat before select-all; no chip
-    clicks; the `enterSbsMode` helper retries the toggle) and is 5/5
-    clean locally — the underlying `enqueueOp`/`applyDoc`/`ceRender`
-    interleavings are still there and worth a focused pass, with the
-    E2E flaky counter as the progress metric.
+14. Open (editor state): intermittent races around open editors. Diagnosed
+    so far (via CPU-throttled reproduction, 6x): (a) the caret tracker's
+    rebuild could destroy selections — fixed, #13; (b) Ctrl+A with the
+    caret inside a raw command span selects only the span (nested
+    contentEditable is the innermost editing host) — the smoke test
+    clicks plain text first; (c) **load-time asyncs eject open editors**:
+    the proofreading auto-check's squiggle re-render and the
+    WS-onopen-triggered second doc refresh + applyDoc re-render can both
+    land mid-edit on slow machines, silently discarding typed text (no
+    save fires). The e2e suite stubs the proof route and waits for
+    network-idle before editing (`settleForEditing`). (c) is a real
+    user-facing hazard — a slow machine + fast typing loses edits the
+    same way; the proper fix is an editor-aware applyDoc that preserves
+    an open editor instead of re-rendering under it.

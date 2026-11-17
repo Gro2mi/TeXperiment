@@ -28,6 +28,20 @@ async function currentDoc(srv) {
   return (await fetch(`${srv.baseUrl}/api/project/${srv.pid}/doc`)).json();
 }
 
+// Barrier for edit tests: the app runs several async chains after load
+// (WS-onopen doc refresh + applyDoc re-render, git, bibliography, and a
+// proofreading auto-check whose squiggle render can eject an open
+// editor). On slow CI runners those land mid-edit and destroy the edit,
+// so: stub the proof check away (it has its own M3 API coverage) and
+// wait for the network to go idle before touching the DOM.
+async function settleForEditing(page) {
+  await page.route('**/api/project/*/proof/check', r =>
+    r.fulfill({contentType: 'application/json',
+      body: JSON.stringify({issues: [], count: 0})}));
+  await page.waitForLoadState('networkidle');
+  await page.waitForTimeout(300);
+}
+
 // Editing drives the raw side-by-side column: a fixed sidebar toggle
 // (no hover timing), one contenteditable segment per block, and
 // toggling back commits dirty files. The commit pipeline is honored
@@ -58,6 +72,7 @@ async function enterSbsMode(page) {
 
 async function editBlockViaRawColumn(page, rel, blockId, oldSource,
                                      newSource) {
+  await settleForEditing(page);
   await enterSbsMode(page);
   const seg = page.locator(
     `.sbsfileseg[data-file="${rel}"][data-block-id="${blockId}"]`);
@@ -152,12 +167,15 @@ test('select-all + type in the inline editor replaces the paragraph',
            b.source.includes('\\texttt{'));
     const oldPrefix = para.source.slice(0, 18);
     const block = page.locator(`.block[data-id="${para.id}"]`);
+    await settleForEditing(page);
     await block.dblclick();
     const ce = block.locator('.inline-ce');
     await ce.waitFor({state: 'visible'});
-    // let the caret tracker's post-open rebuild settle before selecting —
-    // CI timing showed element churn when interacting mid-rebuild (#14)
-    await page.waitForTimeout(250);
+    // click the very start of the text (plain territory): a caret inside
+    // a raw command span (nested contentEditable) makes Ctrl+A select
+    // only the span instead of the whole editor
+    await ce.click({position: {x: 8, y: 12}});
+    await page.waitForTimeout(250);   // caret-tracker rebuild settles
     // the regression (TESTING.md #13): select-all must survive the caret
     // tracker, and typing must REPLACE rather than prepend
     await page.keyboard.press('Control+A');
@@ -175,6 +193,7 @@ test('select-all + type in the inline editor replaces the paragraph',
 test('an external file edit reloads the document over the websocket',
   async ({page}) => {
     await page.goto(srv.baseUrl);
+    await settleForEditing(page);
     // a page reload would wipe this marker; it must still be set after
     // the live update arrives
     await page.evaluate(() => { window.__noReloadMarker = 1; });
