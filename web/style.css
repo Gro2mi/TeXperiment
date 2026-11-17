@@ -499,6 +499,34 @@ body.drag-active .grip { pointer-events: none; }
 .git-add + .git-del {
   margin-left: 4px;
 }
+
+/* ---------- rich table rules (booktabs / cmidrange) ---------- */
+/* rules are borderless <td> rows; the line itself is a ::after bar so
+   cmidrule trim specs can shorten it at the ends */
+.rtrule td { border: none; padding: 0; height: 7px; position: relative; }
+.rrule::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 2px;
+  height: 1.5px; background: var(--panel-ink);
+}
+.rrulegap::after { content: none; }
+.rcmidrule::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 2px;
+  height: 1px; background: var(--panel-ink);
+}
+.rcmidrule.triml::after { left: 0.55em; }
+.rcmidrule.trimr::after { right: 0.55em; }
+
+/* grid editor rule rows (display-only, gutter buttons edit them) */
+.ggrule td { padding: 0 3px; height: 9px; }
+.ggrules { display: flex; width: 100%; height: 100%; }
+.ggrule-seg { position: relative; min-width: 1em; }
+.ggrule-seg::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 3px;
+  height: 1.5px; background: var(--panel-ink);
+}
+.ggrule-seg.triml::after { left: 0.55em; }
+.ggrule-seg.trimr::after { right: 0.55em; }
+.ggrule-gap::after { content: none; }
 .git-del {
   background: var(--git-del-bg);
   color: var(--git-del-ink);

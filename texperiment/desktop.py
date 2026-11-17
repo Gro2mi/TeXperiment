@@ -9,13 +9,19 @@ A second launch while an instance already holds the port activates the
 running window via GET /focus instead of failing on the bind.
 """
 import asyncio
+import os
 import signal
+import subprocess
 import sys
 import threading
 import time
 import webbrowser
 
 import uvicorn
+
+
+def _no_window():
+    return getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 
 def _silence_connection_reset(loop, context):
@@ -93,6 +99,74 @@ def _tee_output():
         pass
 
 
+def _default_browser_cmd():
+    """Windows: the exe of the browser registered for http:// URLs, from
+    the per-user protocol association. Returns (exe, fixed_args) or None."""
+    import re
+    import winreg
+    try:
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\Shell\Associations'
+                r'\UrlAssociations\http\UserChoice') as k:
+            prog_id = winreg.QueryValueEx(k, 'ProgId')[0]
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT,
+                            prog_id + r'\shell\open\command') as k:
+            cmd = winreg.QueryValueEx(k, "")[0]
+    except OSError:
+        return None
+    # '"C:\...\chrome.exe" --single-argument "%1"' → exe + static args
+    m = re.match(r'^\s*"([^"]+)"\s*(.*)$', cmd) \
+        or re.match(r'^\s*([^\s"]+)\s*(.*)$', cmd)
+    if not m:
+        return None
+    exe, rest = m.group(1), m.group(2)
+    # drop placeholder args (quoted or not) — the URL is appended last;
+    # remaining static args (e.g. Firefox's -osint -url) are preserved
+    args = [a.strip('"') for a in re.split(r'\s+', rest)
+            if a and '%1' not in a.replace('"', '')]
+    return exe, args
+
+
+def _open_ui_url(url):
+    """Open the UI in the user's browser. Launching the browser EXE
+    directly (single-instance forwarding) lands the URL as a new TAB in
+    the already-running browser; webbrowser.open (os.startfile /
+    ShellExecute) may open a NEW WINDOW depending on the browser's
+    protocol registration. No browser exe found → shell fallback."""
+    if os.name == 'nt':
+        cand = _default_browser_cmd()
+        if cand:
+            try:
+                subprocess.Popen([cand[0], *cand[1], url],
+                                 creationflags=_no_window())
+                return
+            except OSError:
+                pass  # registry points at a missing exe — try the fallbacks
+        # known installs, most common first
+        for exe in (
+                os.path.expandvars(r'%ProgramFiles%\Google\Chrome'
+                                   r'\Application\chrome.exe'),
+                os.path.expandvars(r'%ProgramFiles(x86)%\Google\Chrome'
+                                   r'\Application\chrome.exe'),
+                os.path.expandvars(r'%ProgramFiles(x86)%\Microsoft\Edge'
+                                   r'\Application\msedge.exe'),
+                os.path.expandvars(r'%ProgramFiles%\Microsoft\Edge'
+                                   r'\Application\msedge.exe'),
+                os.path.expandvars(r'%ProgramFiles%\Mozilla Firefox'
+                                   r'\firefox.exe'),
+                os.path.expandvars(r'%LOCALAPPDATA%\Google\Chrome'
+                                   r'\Application\chrome.exe')):
+            if os.path.isfile(exe):
+                try:
+                    subprocess.Popen([exe, url],
+                                     creationflags=_no_window())
+                    return
+                except OSError:
+                    continue
+    webbrowser.open_new_tab(url)
+
+
 def run(app, host, port, mode='auto', debug=False):
     """Start the server and present the UI. mode: 'window' | 'browser' |
     'server' | 'auto' (window when frozen, browser tab otherwise).
@@ -131,7 +205,7 @@ def run(app, host, port, mode='auto', debug=False):
         return _run_window(app, server, thread, url, debug)
 
     if mode == 'browser':
-        webbrowser.open(url)
+        _open_ui_url(url)
     return _wait_server_only(server)
 
 
@@ -141,7 +215,7 @@ def _run_window(app, server, thread, url, debug):
     except ImportError:
         print('* pywebview not available — opening a browser tab instead',
               flush=True)
-        webbrowser.open(url)
+        _open_ui_url(url)
         return _wait_server_only(server)
     app.state.desktop = True
 

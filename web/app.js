@@ -1097,6 +1097,101 @@ function renderTableHTML(grid, marks, src, git) {
   return `<table class="rtab">${rows}</table>`;
 }
 
+// rich model → HTML: multicolumn spans, booktabs rules (incl. partial
+// \cmidrule ranges), wrapper caption above/below, label chip
+function renderRichTableHTML(m, b) {
+  const marks = proofMarksFor(b);
+  const git = gitMarksFor(b);
+  // locate each cell's text in the block source so proof squiggles and
+  // git word-diffs work inside cells (same approach as renderTableHTML)
+  const texts = [];
+  for (const row of m.rows) for (const c of row.cells) texts.push(c.text);
+  const per = [];
+  if (marks.length && b.source) {
+    let cursor = 0;
+    for (const t of texts) {
+      let off = t ? b.source.indexOf(t, cursor) : -1;
+      if (off < 0) off = t ? b.source.indexOf(t) : -1;
+      if (off >= 0) cursor = off + t.length;
+      per.push([off >= 0 ? shiftMarks(marks, off, t.length) : [],
+        off >= 0 ? shiftGit(git, off, t.length) : null]);
+    }
+  }
+  // logical column count (multicolumn cells span several)
+  const ncolsOf = row => row.cells.reduce(
+    (a, c) => a + (c.mc && c.mc.n > 1 ? c.mc.n : 1), 0);
+  const NC = Math.max(1, ...m.rows.map(ncolsOf));
+  const rulesAt = before => (m.rules || [])
+    .filter(r => r.before === before);
+  // \cmidrule(lr){2-5} → trim spec + 1-based logical column range
+  const cmSpan = arg => {
+    const mm = /\{(\d+)-(\d+)\}\s*$/.exec(arg || '');
+    if (!mm) return null;
+    const trim = /\(([^()]*)\)/.exec(arg || '');
+    return {a: +mm[1], b: +mm[2], trim: trim ? trim[1] : ''};
+  };
+  // one display row per boundary; partial rules get their column range,
+  // gaps between partial rules become borderless spacers
+  const ruleRowsHtml = before => {
+    const rs = rulesAt(before);
+    if (!rs.length) return '';
+    let html = '<tr class="rtrule">';
+    let cursor = 1; // 1-based logical column the next segment starts at
+    for (const r of rs) {
+      const sp = (r.kind === 'cline' || r.kind === 'cmidrule')
+        ? cmSpan(r.arg) : null;
+      if (sp && sp.a >= 1 && sp.b <= NC && sp.b >= sp.a) {
+        if (sp.a > cursor)
+          html += `<td colspan="${sp.a - cursor}" class="rrulegap"></td>`;
+        const cls = 'rcmidrule' + (sp.trim.includes('l') ? ' triml' : '') +
+          (sp.trim.includes('r') ? ' trimr' : '');
+        html += `<td colspan="${sp.b - sp.a + 1}" class="${cls}"></td>`;
+        cursor = sp.b + 1;
+      } else {
+        html += `<td colspan="${NC}" class="rrule rr-${esc(r.kind)}"></td>`;
+        cursor = NC + 1;
+      }
+    }
+    return html + '</tr>';
+  };
+  let k = 0;
+  // ALL rule rows must be INSIDE the <table> element — stray <tr> before
+  // or after it gets foster-parented/dropped by the HTML parser
+  let html = '<table class="rtab">';
+  html += ruleRowsHtml(0); // toprule
+  m.rows.forEach((row, ri) => {
+    html += '<tr>';
+    row.cells.forEach(c => {
+      const pair = per.length ? per[k] : [null, null];
+      k++;
+      const span = c.mc && c.mc.n > 1 ? ` colspan="${c.mc.n}"` : '';
+      html += `<td${span}>${renderInline(c.text, pair[0], pair[1])}</td>`;
+    });
+    html += '</tr>';
+    html += ruleRowsHtml(ri + 1); // rules bound below this row
+  });
+  html += '</table>';
+  return html;
+}
+
+function richTableMetaHtml(m, b) {
+  // caption (with citet/cite chips resolving) + label chip — shared by
+  // the table render and the grid editor preview
+  const parts = [];
+  if (m.caption) {
+    const cOff = b.source.indexOf(m.caption.text);
+    const cMarks = cOff >= 0
+      ? shiftMarks(proofMarksFor(b), cOff, m.caption.text.length) : [];
+    const cGit = cOff >= 0
+      ? shiftGit(gitMarksFor(b), cOff, m.caption.text.length) : null;
+    parts.push(`<figcaption class="figcap">${renderInline(m.caption.text, cMarks, cGit)}</figcaption>`);
+  }
+  if (m.label) parts.push(
+    `<div class="mathlabels"><span class="refchip" data-label="${esc(m.label)}" ` +
+    `title="click to jump to this table">label:${esc(m.label)}</span></div>`);
+  return parts.join('');
+}
+
 function figureParts(src) {
   const ig = /\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}/.exec(src);
   let caption = '';
@@ -1323,6 +1418,17 @@ function renderBlockContent(b) {
       return `<${tag} class="rtext">${items.join('')}</${tag}>`;
     }
     case 'table': {
+      // rich model first: spans, booktabs rules, cmidrule ranges, wrapper
+      // caption/label — falls back to the simple/lenient paths for exotic
+      // tables the rich parser rejects
+      const M = parseTableRich(b.source);
+      if (M) {
+        const meta = richTableMetaHtml(M, b);
+        const cap = M.caption && M.caption.pos === 'above' ? meta : '';
+        const capBelow = (!M.caption || M.caption.pos !== 'above') ? meta : '';
+        return `<div class="tabwrap">` + cap + renderRichTableHTML(M, b) +
+          capBelow + `</div>`;
+      }
       const t = parseTabular(b.source);
       if (t) return renderTableHTML(t.grid, proofMarksFor(b), b.source, gitMarksFor(b));
       const L = parseTabularLenient(b.source);
@@ -2245,16 +2351,16 @@ function cePlaceCaret(ref, srcOff) {
   sel.addRange(r);
 }
 
-function openInlineEdit(b, ev, sourceOverride) {
+function openInlineEdit(b, ev, sourceOverride, caretOff) {
   // queued: a dirty raw file commits (and rebuilds) FIRST — this editor
   // then opens on the settled DOM and stays open
   enqueueOp(() => {
     const b2 = blockById(b.id) || b;
-    reallyOpenInlineEdit(b2, ev, sourceOverride);
+    reallyOpenInlineEdit(b2, ev, sourceOverride, caretOff);
   });
 }
 
-function reallyOpenInlineEdit(b, ev, sourceOverride) {
+function reallyOpenInlineEdit(b, ev, sourceOverride, caretOff) {
   if (state.edit) closeEditor();
   commitDirtyRawFiles();
   if (state.inlineEdit) commitInlineEdit();
@@ -2308,6 +2414,13 @@ function reallyOpenInlineEdit(b, ev, sourceOverride) {
     }
   }
   ec.focus();
+  // re-open from applyDoc's editor preservation: restore the caret the
+  // edit had when the document refreshed under it. Must happen INSIDE
+  // the queued open — state.inlineEdit is null until reallyOpenInlineEdit
+  // runs, so placing it at the call site would throw and silently skip
+  if (caretOff !== undefined && caretOff !== null) {
+    cePlaceCaret(state.inlineEdit, caretOff);
+  }
   ec.addEventListener('input', () => {
     const ref = state.inlineEdit;
     if (!ref || ref.ec !== ec) return;
@@ -2450,17 +2563,23 @@ function commitInlineEdit() {
     const src = reflowLongLines(ref.source);
     if (src === ref.original) {
       rerenderBlock(ref.block);
+      flushPendingDiffRerender();
       return;
     }
     try {
       const res = await ppost(`/block/${ref.id}/save`, {source: src});
       applyDoc(res.doc);
+      // applyDoc re-rendered the whole document with the current proof/
+      // bib/git state — any re-render deferred while we were editing is
+      // already covered by it
+      state._pendingDiffRerender = false;
       toast('Saved');
       checkBlocks([ref.id]);
       refreshGitSoon();
     } catch (e) {
       handleOpError(e, ref.block);
       rerenderBlock(ref.block);
+      flushPendingDiffRerender();
     }
   });
 }
@@ -2470,6 +2589,7 @@ function cancelInlineEdit() {
   if (!ref) return;
   state.inlineEdit = null;
   rerenderBlock(ref.block);
+  flushPendingDiffRerender();
 }
 
 // text offset of a (node, offset) point within bc's rendered text
@@ -3134,10 +3254,7 @@ function closeEditor() {
   state.edit = null;
   if (b) rerenderBlock(b);
   closeOrphanAutocomplete(); // popups die with their editor (no blur event)
-  if (state._pendingDiffRerender) {
-    state._pendingDiffRerender = false;
-    rerenderContentPreservingScroll();
-  }
+  flushPendingDiffRerender();
 }
 
 function openEditor(b, freshOpts) {
@@ -4176,6 +4293,44 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
   };
 
 
+  // display-only rule rows inside the grid: full rules span all columns,
+  // \cmidrule segments land on their true column ranges (editor edits
+  // happen via the gutter buttons — these rows just show what is there)
+  function appendGridRules(tbl, before) {
+    const rs = (model.rules || []).filter(x => x.before === before);
+    if (!rs.length) return;
+    const trr = el('tr', 'ggrule');
+    trr.append(el('td', 'grow'));
+    const td = el('td');
+    td.colSpan = ncols();
+    const wrap = el('div', 'ggrules');
+    let cursor = 1; // 1-based logical column the next segment starts at
+    for (const r of rs) {
+      const mm = /\{(\d+)-(\d+)\}\s*$/.exec(r.arg || '');
+      const partial = (r.kind === 'cline' || r.kind === 'cmidrule') && mm;
+      if (partial && +mm[1] > cursor) {
+        const gap = el('span', 'ggrule-gap');
+        gap.style.width = (+mm[1] - cursor) / ncols() * 100 + '%';
+        wrap.append(gap);
+      }
+      const seg = el('span', 'ggrule-seg ggrule-' + r.kind);
+      if (partial) {
+        seg.style.width = (+mm[2] - +mm[1] + 1) / ncols() * 100 + '%';
+        const trim = /\(([^()]*)\)/.exec(r.arg || '');
+        if (trim && trim[1].includes('l')) seg.classList.add('triml');
+        if (trim && trim[1].includes('r')) seg.classList.add('trimr');
+        cursor = +mm[2] + 1;
+      } else {
+        seg.style.width = '100%';
+        cursor = ncols() + 1;
+      }
+      wrap.append(seg);
+    }
+    td.append(wrap);
+    trr.append(td);
+    tbl.append(trr);
+  }
+
   function redraw() {
     tbl.innerHTML = '';
     cellInputs = [];
@@ -4221,6 +4376,7 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
       head.append(td);
     }
     tbl.append(colgroup, head);
+    appendGridRules(tbl, 0); // toprule row
 
     model.rows.forEach((row, r) => {
       const tr = el('tr');
@@ -4276,6 +4432,7 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
       // pad short rows visually so the grid stays rectangular
       for (let p = logicalCols(row); p < maxC; p++) tr.append(el('td', 'gpad'));
       tbl.append(tr);
+      appendGridRules(tbl, r + 1); // rules bound to this boundary
     });
 
     // measure after layout: the editor root attaches right after
@@ -4304,14 +4461,20 @@ function buildGridEditor(b, ed, bar, commit, cancel) {
     clearTimeout(prevTimer);
     prevTimer = setTimeout(() => {
       const src = serializeTableRich(model);
-      const L = parseTabularLenient(src);
-      if (L) {
+      const M = parseTableRich(src);
+      if (M) {
         preview.innerHTML = '<div class="tabwrap">' +
-          renderTableHTML(L.grid) +
-          (L.caption ? `<figcaption class="figcap">${renderInline(L.caption)}</figcaption>` : '') +
-          '</div>';
+          renderRichTableHTML(M, b) + '</div>';
       } else {
-        preview.innerHTML = '<pre class="kerr">' + esc(src) + '</pre>';
+        const L = parseTabularLenient(src);
+        if (L) {
+          preview.innerHTML = '<div class="tabwrap">' +
+            renderTableHTML(L.grid) +
+            (L.caption ? `<figcaption class="figcap">${renderInline(L.caption)}</figcaption>` : '') +
+            '</div>';
+        } else {
+          preview.innerHTML = '<pre class="kerr">' + esc(src) + '</pre>';
+        }
       }
     }, 120);
   }
@@ -5033,7 +5196,9 @@ function renderGit() {
   commitBtn.onclick = () => gitCommit(ta);
   pushBtn.onclick = e => gitPush(e.currentTarget);
   cpushBtn.onclick = () => gitCommit(ta, true);
-  bar.append(commitBtn, cpushBtn, pushBtn);
+  // commit-and-push sits on the far right: plain commit, plain push,
+  // then the combined action
+  bar.append(commitBtn, pushBtn, cpushBtn);
   panel.append(ta, bar);
   ta.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -5691,11 +5856,24 @@ function dropProofIssue(issue) {
   rerenderContentPreservingScroll();
 }
 
-// re-render the content area without losing the reading position
+// run a full re-render that a background chain deferred while an editor
+// was open (see rerenderContentPreservingScroll)
+function flushPendingDiffRerender() {
+  if (state._pendingDiffRerender) {
+    state._pendingDiffRerender = false;
+    rerenderContentPreservingScroll();
+  }
+}
+
 function rerenderContentPreservingScroll() {
-  if (state.edit) {
+  if (state.edit || state.inlineEdit) {
     // an open editor would be torn down by a full re-render - defer
-    // until it is closed (closeEditor flushes this)
+    // until it is closed (closeEditor / commitInlineEdit /
+    // cancelInlineEdit flush this). Covers every background chain that
+    // re-renders for marks: proof checks (the finally re-renders even
+    // with zero issues), bibliography refresh, git diff marks, graphics
+    // refresh — the load-time asyncs that eject an open editor and
+    // silently discard typed text on slow machines (TESTING.md #14c)
     state._pendingDiffRerender = true;
     return;
   }
@@ -6204,8 +6382,7 @@ function applyDoc(doc, fromDisk = false) {
   if (inlineKeep) {
     const m2 = doc.blocks.find(x => x.id === inlineKeep.id);
     if (m2) {
-      openInlineEdit(m2, null, inlineKeep.source);
-      cePlaceCaret(state.inlineEdit, inlineKeep.caret);
+      openInlineEdit(m2, null, inlineKeep.source, inlineKeep.caret);
     }
   }
 
@@ -6295,19 +6472,25 @@ function connectWS() {
   state.ws = ws;
   ws.onopen = () => {
     setConn(true);
+    const firstOpen = !state._wsEverOpened;
+    state._wsEverOpened = true;
     // ALWAYS pull the full state on (re)connect: the page may have sat
     // open for days while files changed behind its back (server restart,
     // external editor, git operations). Its in-memory doc can be stale —
     // saving against it overwrites newer disk content, which is how edits
     // get lost. Reload everything, every time, and drop unsaved editor
-    // state that belonged to the stale document.
+    // state that belonged to the stale document — reconnects only. On the
+    // first open the document was loaded (by this very chain or moments
+    // before at boot) against current disk state; a discard here would
+    // only eject an editor that a slow machine opened while this late
+    // handshake was still in flight
     fetch('/api/projects').then(r => r.ok ? r.json() : null).then(projects => {
       if (!Array.isArray(projects)) return;
       state.projects = projects;
       // refreshProjects re-picks the current project (ids can change
       // across a server restart) and reloads the document itself
       refreshProjects().then(() => {
-        discardStaleEditState();
+        if (!firstOpen) discardStaleEditState();
         refreshGit();
         loadProofConfig();
         refreshBib();
