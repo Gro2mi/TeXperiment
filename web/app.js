@@ -28,6 +28,8 @@ const state = {
     catch (e) { return ''; } })(), // commit message draft (survives re-renders)
   diskAcked: false,   // 'acknowledge all' pressed for the current set
   diskAckedKeys: new Set(), // block keys acknowledged this session
+  desktop: false,     // native window shell (pywebview) — /api/env
+  proofTimer: null,   // LanguageTool install-state polling
   proof: {           // proofreading state
     config: null,    // /proof/config payload (engine availability)
     issues: [],
@@ -4535,7 +4537,14 @@ async function compileProject(pid) {
     if (target === state.project) {
       refreshBib(); // the .bbl just changed — resolve citations with it
     }
-    window.open(res.pdf + '?t=' + Date.now(), '_blank');
+    if (state.desktop) {
+      // native window: hand the PDF to the system viewer instead of a
+      // browser tab (the window must not navigate away)
+      post(`/api/project/${target}/pdf-open`, {})
+        .catch(e => showCompileLog(e.message));
+    } else {
+      window.open(res.pdf + '?t=' + Date.now(), '_blank');
+    }
     if (res.clean === false && res.log) {
       showCompileLog('The PDF was produced, but LaTeX reported problems:\n\n' + res.log);
     } else {
@@ -5371,6 +5380,8 @@ async function loadProofConfig() {
 
 function renderProof() {
   const panel = $('#proofpanel');
+  clearTimeout(state.proofTimer); // stop any install-state polling
+  state.proofTimer = null;
   panel.innerHTML = '';
   $('#proofHead').classList.toggle('hidden', !state.project);
   if (!state.project) return;
@@ -5404,6 +5415,7 @@ function renderProof() {
     panel.append(el('div', 'pferrbox',
       esc(p.config.error || 'proofreading engine unavailable')));
   }
+  appendLtDecisionBox(panel, p.config);
 
   if (!p.issues.length) {
     if (p.checked) panel.append(el('div', 'gitmuted', 'No issues found ✓'));
@@ -5417,6 +5429,65 @@ function renderProof() {
     (order.get(a.block_id) ?? 1e9) - (order.get(b.block_id) ?? 1e9) ||
     a.start - b.start);
   for (const it of sorted) panel.append(proofRow(it));
+}
+
+// the LanguageTool jar (~200 MB, needs Java) is downloaded ONLY on the
+// user's explicit request — this box is where that decision happens
+function appendLtDecisionBox(panel, cfg) {
+  const lt = cfg && cfg.lt;
+  if (!lt || lt.state === 'ready') return;
+  const box = el('div', 'pfdecide');
+  if (lt.state === 'installing') {
+    box.append(el('div', 'pfdecidehead',
+      '<span class="spin"></span> Downloading LanguageTool (~200 MB, one-time)…'));
+    box.append(el('div', 'pfdecidetext',
+      'Full grammar checking will be available afterwards. You can keep ' +
+      'editing while it downloads.'));
+  } else if (lt.state === 'no-java') {
+    box.append(el('div', 'pfdecidehead',
+      'LanguageTool needs Java, which is not installed.'));
+    box.append(el('div', 'pfdecidetext',
+      'Install Java (e.g. from adoptium.net) and restart TeXperiment to ' +
+      'enable full grammar checking — or use the offline spellchecker.'));
+  } else {
+    box.append(el('div', 'pfdecidehead',
+      'Offline spellchecker active — typo checks only.'));
+    box.append(el('div', 'pfdecidetext',
+      'Full grammar and style checking needs the LanguageTool engine ' +
+      '(~200 MB, downloaded once, needs Java).'));
+    if (lt.error) box.append(el('div', 'pfdecideerr', esc(lt.error)));
+    const dl = el('button', 'edbtn primary', 'Download LanguageTool');
+    dl.title = 'Download the LanguageTool engine (~200 MB, one-time)';
+    dl.onclick = async () => {
+      dl.disabled = true;
+      try {
+        await ppost('/proof/install-lt', {});
+      } catch (e) { toast('Download failed to start: ' + e.message, true); }
+      loadProofConfig(); // re-render into the polling state
+    };
+    box.append(dl);
+  }
+  const sw = el('button', 'edbtn', 'Use offline spellchecker');
+  sw.title = 'Switch to the built-in offline typo checker';
+  sw.onclick = async () => {
+    try {
+      state.proof.config = await ppost('/proof/engine', {engine: 'spellcheck'});
+      state.proof.issues = [];
+      state.proof.checked = false;
+      renderProof();
+      toast('Offline spellchecker enabled');
+    } catch (e) { toast('Switch failed: ' + e.message, true); }
+  };
+  box.append(sw);
+  panel.append(box);
+  if (lt.state === 'installing') {
+    // poll until the download settles — the box then shows the outcome
+    state.proofTimer = setTimeout(async () => {
+      try { state.proof.config = await papi('/proof/config'); }
+      catch (e) { /* keep polling on transient errors */ }
+      renderProof();
+    }, 2000);
+  }
 }
 
 function proofRow(it) {
@@ -5717,7 +5788,14 @@ function showCitePopup(span) {
       link.target = '_blank';
       link.rel = 'noopener noreferrer';
       link.title = e.url;
-      link.onclick = ev => ev.stopPropagation();
+      link.onclick = ev => {
+        ev.stopPropagation();
+        if (state.desktop) {
+          // native window: system browser, never navigate the app away
+          ev.preventDefault();
+          post('/open-url', {url: e.url}).catch(() => {});
+        }
+      };
       item.append(link);
     }
     pop.append(item);
@@ -6198,8 +6276,13 @@ function watchMathLibs() {
 }
 
 // connect the live socket first — the status pill must not wait for
-// project loading or CDN math libs
+// project loading or math libs
 connectWS();
+
+// desktop shell? the native window never navigates away: external links
+// and compiled PDFs are handed to the system instead
+api('/api/env').then(env => { state.desktop = !!env.desktop; })
+  .catch(() => {});
 
 (async () => {
   try {

@@ -21,13 +21,19 @@ class GitError(Exception):
 # collide with a user-initiated `add`/`commit` (index.lock race)
 _GIT_LOCK = threading.Lock()
 
+# windowed frozen builds (console=False) have no console for children to
+# inherit: without this flag every git call allocates a NEW visible
+# terminal window — a flash per refresh, dozens at startup
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
 
 def _run(root, *args, ok_codes=(0,), binary=False):
     """Run git in root; returns stdout (str with surrogates replaced, or bytes)."""
     cmd = ['git', '-c', 'core.quotepath=false', '-c', 'color.ui=false', *args]
     with _GIT_LOCK:
         try:
-            p = subprocess.run(cmd, cwd=str(root), capture_output=True, timeout=20)
+            p = subprocess.run(cmd, cwd=str(root), capture_output=True,
+                               timeout=20, creationflags=_NO_WINDOW)
         except FileNotFoundError:
             raise GitError('git is not installed or not on PATH')
         except subprocess.TimeoutExpired:
@@ -542,8 +548,9 @@ def _stage_blob(store, rel, content):
     enc = next((e2['encoding'] for e2 in store.doc['files']
                 if e2['path'] == rel), 'utf-8')
     data = content.encode(enc or 'utf-8')
-    p = subprocess.run(['git', 'hash-object', '-w', '--stdin'], cwd=str(store.root),
-                       input=data, capture_output=True, timeout=20)
+    p = subprocess.run(['git', 'hash-object', '-w', '--stdin'],
+                       cwd=str(store.root), input=data, capture_output=True,
+                       timeout=20, creationflags=_NO_WINDOW)
     if p.returncode != 0:
         raise GitError(p.stderr.decode('utf-8', errors='replace').strip())
     sha = p.stdout.decode('utf-8').strip()

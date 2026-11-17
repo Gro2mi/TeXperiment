@@ -12,6 +12,7 @@ import json
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -348,6 +349,7 @@ def test_proof_config_check_dictionary_ignore(client):
     cfg = c.get(f'/api/project/{pid}/proof/config').json()
     assert cfg['engine'] == 'spellcheck'
     assert cfg['available'] is True
+    assert 'lt' not in cfg  # the install-state payload is LT-only
 
     bid = bid_by_prefix(c, pid, 'Chapter two arrives', file='chapters/ch2.tex')
     c.post(f'/api/project/{pid}/block/{bid}/save',
@@ -364,6 +366,59 @@ def test_proof_config_check_dictionary_ignore(client):
     r = c.post(f'/api/project/{pid}/proof/ignore',
                json={'rule': 'MISSPELLING', 'text': 'mispelled'})
     assert r.status_code == 200 and r.json() == {'ok': True}
+
+
+def test_proof_languagetool_gate_never_downloads(client, monkeypatch):
+    """The LanguageTool engine reports its install state and REFUSES to
+    check while the jar is missing — a check must never trigger the
+    ~200 MB download implicitly."""
+    from texperiment import proof as proof_mod
+
+    c, pid, _ = client
+    # switch the app to the LanguageTool engine (the runtime-switch route)
+    r = c.post(f'/api/project/{pid}/proof/engine', json={'engine': 'languagetool'})
+    assert r.status_code == 200
+    cfg = r.json()
+    assert cfg['engine'] == 'languagetool'
+    assert 'lt' in cfg and cfg['lt']['state'] in (
+        'ready', 'needs-download', 'no-java')
+
+    # force the "java present, jar missing" state and forbid downloads
+    monkeypatch.setattr(proof_mod.LanguageToolEngine, '_java_present',
+                        staticmethod(lambda: True))
+    monkeypatch.setattr(proof_mod.LanguageToolEngine, '_jar_present',
+                        staticmethod(lambda: False))
+
+    class _ForbidLT:
+        def __getattr__(self, name):  # any use = implicit download attempt
+            raise AssertionError('LanguageTool was constructed implicitly!')
+    monkeypatch.setitem(sys.modules, 'language_tool_python', _ForbidLT())
+    # the check cache is module-level and keyed (block, source, lang) —
+    # an earlier test's spellcheck results must not shadow the gate
+    monkeypatch.setattr(proof_mod, '_cache', {})
+
+    bid = bid_by_prefix(c, pid, 'Chapter two arrives', file='chapters/ch2.tex')
+    c.post(f'/api/project/{pid}/block/{bid}/save',
+           json={'source': 'This sentence contains a mispelled word.'})
+    r = c.post(f'/api/project/{pid}/proof/check', json={'lang': 'en-US'})
+    assert r.status_code == 400
+    assert 'download' in r.json()['detail'].lower()
+    # the config payload reports the decision the UI needs
+    cfg = c.get(f'/api/project/{pid}/proof/config').json()
+    assert cfg['lt']['state'] == 'needs-download'
+    assert cfg['lt']['java'] is True and cfg['lt']['jar'] is False
+
+    # switching back to spellcheck restores working checks (and persists)
+    r = c.post(f'/api/project/{pid}/proof/engine', json={'engine': 'spellcheck'})
+    assert r.status_code == 200 and r.json()['engine'] == 'spellcheck'
+    r = c.post(f'/api/project/{pid}/proof/check', json={'lang': 'en-US'})
+    assert r.status_code == 200 and r.json()['count'] >= 1
+    from texperiment.server import load_settings
+    assert load_settings().get('proof_engine') == 'spellcheck'
+
+    r = c.post(f'/api/project/{pid}/proof/engine',
+               json={'engine': 'nope'})
+    assert r.status_code == 400
 
 
 # -- bibliography ---------------------------------------------------------------------
@@ -456,12 +511,49 @@ def test_file_serving_with_etag(client):
 
 def test_compile_without_tex_toolchain_is_400(client, monkeypatch):
     c, pid, _ = client
-    monkeypatch.setattr('texperiment.server.shutil.which',
-                        lambda name: None)
+    # nothing on PATH, no typical install dirs, no bundled tectonic
+    monkeypatch.setattr('texperiment.server.shutil.which', lambda name: None)
+    monkeypatch.setattr('texperiment.server._tex_dirs', lambda: [])
+    monkeypatch.setattr('texperiment.server._bundled_tectonic', lambda: None)
     r = c.post(f'/api/project/{pid}/compile')
     assert r.status_code == 400
     assert 'TeX' in r.json()['detail']
     assert c.get(f'/api/project/{pid}/pdf').status_code == 404
+
+
+def test_compile_tectonic_fallback(client, monkeypatch, tmp_path):
+    """No latexmk/pdflatex on PATH, but a bundled tectonic: the compile
+    route must run it and serve the PDF it produces (a stub stands in for
+    the real binary — its bundle download needs the internet)."""
+    import os
+
+    c, pid, root = client
+    if os.name == 'nt':
+        stub = tmp_path / 'fake_tectonic.bat'
+        # %% escapes to a literal % in a batch file; redirection comes
+        # first so the trailing "4" cannot parse as a handle redirect
+        stub.write_text('@echo off\r\n'
+                        '> "%~d1%~p1%~n1.pdf" echo %%PDF-1.4\r\n'
+                        '>> "%~d1%~p1%~n1.pdf" echo %%EOF\r\n',
+                        encoding='ascii')
+        tect = str(stub)
+    else:
+        stub = tmp_path / 'fake_tectonic'
+        stub.write_text(
+            '#!/bin/sh\nout=$(dirname "$1")/$(basename "$1" .tex).pdf\n'
+            'printf "%%PDF-1.4\\n%%%%EOF\\n" > "$out"\n', encoding='utf-8')
+        stub.chmod(0o755)
+        tect = str(stub)
+    monkeypatch.setattr('texperiment.server.shutil.which', lambda name: None)
+    monkeypatch.setattr('texperiment.server._tex_dirs', lambda: [])
+    monkeypatch.setattr('texperiment.server._bundled_tectonic',
+                        lambda: tect)
+    r = c.post(f'/api/project/{pid}/compile')
+    assert r.status_code == 200, r.text
+    assert r.json()['ok'] is True
+    r = c.get(f'/api/project/{pid}/pdf')
+    assert r.status_code == 200
+    assert r.content[:5] == b'%PDF-'
 
 
 @pytest.mark.skipif(not shutil.which('latexmk'),

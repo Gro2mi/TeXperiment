@@ -17,6 +17,8 @@ specific rule+text findings, e.g. a grammar rule that misfires on one phrase.
 """
 import json
 import re
+import shutil
+import threading
 from pathlib import Path
 
 from .parser import mask_comments
@@ -231,25 +233,135 @@ def _norm_lang(lang):
 
 
 class LanguageToolEngine:
-    """Local LanguageTool server (language-tool-python). Needs Java; the
-    LanguageTool archive is downloaded on first use."""
+    """Local LanguageTool server (language-tool-python). Needs Java and a
+    ~200 MB LanguageTool archive — both must be present before any check
+    runs: nothing is downloaded implicitly, the user opts in from the
+    Proofreading panel (start_install)."""
     name = 'languagetool'
 
     def __init__(self):
         self._lt = {}
         self._error = None
+        self._installing = False
+        self._install_error = None
+
+    @staticmethod
+    def _java_present():
+        return shutil.which('java') is not None
+
+    @staticmethod
+    def _jar_present():
+        # language-tool-python's download cache (one jar per version)
+        base = Path.home() / '.cache' / 'language_tool_python'
+        try:
+            return any(base.rglob('languagetool-server.jar'))
+        except OSError:
+            return False
+
+    @staticmethod
+    def _quiet_popen():
+        """Context manager making subprocess.Popen launch children without
+        a visible console while active. The LanguageTool java server is
+        spawned by language-tool-python's own Popen call; in a windowed
+        frozen build that would otherwise keep a terminal window on
+        screen for the whole session. Scoped to LT construction only —
+        the global subprocess module is restored afterwards."""
+        import contextlib
+        import subprocess
+
+        if not hasattr(subprocess, 'CREATE_NO_WINDOW'):
+            return contextlib.nullcontext()
+
+        orig = subprocess.Popen
+
+        def _quiet(*a, **k):
+            k['creationflags'] = (k.get('creationflags', 0)
+                                  | subprocess.CREATE_NO_WINDOW)
+            return orig(*a, **k)
+
+        @contextlib.contextmanager
+        def _ctx():
+            subprocess.Popen = _quiet
+            try:
+                yield
+            finally:
+                subprocess.Popen = orig
+
+        return _ctx()
+
+    def lt_state(self):
+        """Install state for the /proof/config payload and the panel UI."""
+        java = self._java_present()
+        jar = self._jar_present()
+        if self._installing:
+            state = 'installing'
+        elif not java:
+            state = 'no-java'
+        elif jar:
+            state = 'ready'
+        else:
+            state = 'needs-download'
+        return {'java': java, 'jar': jar, 'state': state,
+                'installing': self._installing, 'error': self._install_error}
+
+    def start_install(self):
+        """Download the LanguageTool archive in the background (single
+        flight). The jar lands in language-tool-python's cache, so later
+        engine instances find it without another download."""
+        if self._installing:
+            return
+        st = self.lt_state()
+        if st['state'] == 'ready':
+            return
+        if st['state'] == 'no-java':
+            self._install_error = ('Java is not installed — LanguageTool '
+                                   'cannot run. Install Java and retry.')
+            return
+        self._installing = True
+        self._install_error = None
+
+        def _work():
+            try:
+                import language_tool_python
+                with self._quiet_popen():
+                    lt = language_tool_python.LanguageTool('en-US')
+                try:
+                    lt.close()  # warm cache validated; stop the java server
+                except Exception:
+                    pass  # older versions lack close()
+            except Exception as e:
+                self._install_error = f'LanguageTool download failed: {e}'
+            finally:
+                self._installing = False
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _get(self, lang):
         if self._error:
             raise ProofError(self._error)
         if lang not in self._lt:
+            # the consent gate: language_tool_python would otherwise
+            # download the archive silently on first use
+            st = self.lt_state()['state']
+            if st == 'no-java':
+                raise ProofError(
+                    'LanguageTool needs Java, which is not installed — '
+                    'install Java, or switch to the offline spellchecker '
+                    'in the Proofreading panel.')
+            if st == 'needs-download':
+                raise ProofError(
+                    'LanguageTool is not downloaded yet — use the '
+                    'download button in the Proofreading panel, or '
+                    'switch to the offline spellchecker there.')
             try:
                 import language_tool_python
-                self._lt[lang] = language_tool_python.LanguageTool(lang)
-            except Exception as e:  # Java missing, download failed, …
+                with self._quiet_popen():
+                    self._lt[lang] = language_tool_python.LanguageTool(lang)
+            except Exception as e:  # Java broken, corrupt cache, …
                 self._error = (
                     f'LanguageTool could not start: {e} '
-                    '(needs Java; fall back to --proof-engine spellcheck)')
+                    '(fall back to the offline spellchecker in the '
+                    'Proofreading panel)')
                 raise ProofError(self._error)
         return self._lt[lang]
 

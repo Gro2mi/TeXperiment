@@ -1,0 +1,111 @@
+name: build
+# Desktop app packages — built on version tags and manual dispatch only
+# (a full build costs ~15 min per OS; pushes run tests.yml instead).
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # tag runs publish a GitHub Release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            osname: windows
+          - os: ubuntu-latest
+            osname: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller pywebview pillow
+
+      - name: Verify vendored math libs
+        run: python packaging/fetch_vendor.py --check
+
+      - name: Fetch bundled tectonic
+        run: python packaging/fetch_tectonic.py
+
+      - name: PyInstaller build
+        run: python -m PyInstaller texperiment.spec --noconfirm --distpath dist --workpath build
+
+      - name: Smoke test the built app
+        shell: bash
+        run: |
+          PORT=$(( RANDOM % 20000 + 20000 ))
+          if [ "${{ matrix.osname }}" = "windows" ]; then
+            ./dist/TeXperiment/TeXperiment.exe --no-window --port $PORT &
+          else
+            ./dist/TeXperiment/TeXperiment --no-window --port $PORT &
+          fi
+          APP_PID=$!
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:$PORT/api/projects" > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf "http://127.0.0.1:$PORT/api/projects" | grep -q '"id"'
+          curl -sf "http://127.0.0.1:$PORT/vendor/katex/katex.min.js" -o /dev/null
+          curl -sf "http://127.0.0.1:$PORT/api/env" | grep -q '"desktop"'
+          kill $APP_PID 2>/dev/null || true
+
+      - name: Install Inno Setup (windows)
+        if: matrix.osname == 'windows'
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer (windows)
+        if: matrix.osname == 'windows'
+        shell: bash
+        run: |
+          VERSION=$(python -c "import sys; sys.path.insert(0,'.'); from texperiment import __version__; print(__version__)")
+          "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DVERSION=$VERSION" packaging/installer.iss
+
+      - name: Pack zip (windows — no-install option alongside the installer)
+        if: matrix.osname == 'windows'
+        shell: bash
+        run: |
+          VERSION=$(python -c "import sys; sys.path.insert(0,'.'); from texperiment import __version__; print(__version__)")
+          powershell -NoProfile -Command "Compress-Archive -Path dist/TeXperiment -DestinationPath dist/TeXperiment-${VERSION}-windows.zip"
+
+      - name: Pack tarball (linux)
+        if: matrix.osname == 'linux'
+        run: |
+          VERSION=$(python -c "import sys; sys.path.insert(0,'.'); from texperiment import __version__; print(__version__)")
+          tar -C dist -czf "dist/texperiment-${VERSION}-linux.tar.gz" TeXperiment
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: texperiment-${{ matrix.osname }}
+          path: |
+            dist/TeXperimentSetup-*.exe
+            dist/TeXperiment-*-windows.zip
+            dist/texperiment-*-linux.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

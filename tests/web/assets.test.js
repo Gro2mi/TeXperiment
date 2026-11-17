@@ -30,7 +30,9 @@ describe('index.html cache-busted assets', () => {
   });
 
   it('no self-hosted script/stylesheet is referenced unversioned', () => {
-    const bare = refs(/(?:src|href)="\/[^"]+\.(?:js|css)"/g);
+    // web/vendor/ is exempt: the third-party libs are pinned by the
+    // sha256 manifest (fetch_vendor.py --check), not by query strings
+    const bare = refs(/(?:src|href)="\/(?!vendor\/)[^"]+\.(?:js|css)"/g);
     expect(bare.map(m => m[0])).toEqual([]);
   });
 

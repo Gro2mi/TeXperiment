@@ -11,3 +11,8 @@ playwright-report/
 main.pdf
 *.log
 TODO.md
+# packaging build outputs (fetched/generated, not committed)
+packaging/tectonic/
+packaging/tools/
+build/
+dist/

@@ -1,25 +1,15 @@
 """CLI entry point: python -m texperiment [main.tex ...] [--port 8080]
 
 Starts one server that can hold several projects; projects persist per port
-on disk (~/.texperiment/projects.json) and more can be added from the UI."""
+on disk (~/.texperiment/projects.json) and more can be added from the UI.
+The UI is presented in a native app window (pywebview) when packaged, and
+as a browser tab in development."""
 import argparse
-import asyncio
-import signal
-import threading
-import time
+import sys
 
-import uvicorn
-
+from .desktop import run
 from .server import create_app
-
-
-def _silence_connection_reset(loop, context):
-    """Windows Proactor IO: browsers can drop keep-alive connections
-    mid-shutdown, and asyncio logs every such reset as an exception even
-    though uvicorn handles it fine — swallow it instead."""
-    if isinstance(context.get('exception'), ConnectionResetError):
-        return  # handled
-    loop.default_exception_handler(context)
+from .version import __version__
 
 
 def main():
@@ -31,47 +21,40 @@ def main():
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=8080)
     ap.add_argument('--proof-engine', choices=('languagetool', 'spellcheck'),
-                    default='languagetool',
-                    help='proofreading engine (default: languagetool, needs '
-                         'Java; spellcheck is an offline typo-only fallback)')
+                    default=None,
+                    help='proofreading engine (default: the persisted '
+                         'setting, else languagetool — full grammar checks; '
+                         'spellcheck is an offline typo-only fallback). '
+                         'LanguageTool downloads on explicit user request '
+                         'from the Proofreading panel only.')
+    ap.add_argument('--engine', choices=('auto', 'latexmk', 'tectonic'),
+                    default='auto',
+                    help='LaTeX compile engine (default: auto = latexmk/'
+                         'pdflatex when installed, else the bundled '
+                         'tectonic)')
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument('--window', dest='mode', action='store_const',
+                   const='window', default=None,
+                   help='open a native app window (default when packaged)')
+    g.add_argument('--no-window', dest='mode', action='store_const',
+                   const='server', default=None,
+                   help='server only — no window, no browser (headless/CI)')
+    g.add_argument('--browser', dest='mode', action='store_const',
+                   const='browser', default=None,
+                   help='open the UI as a browser tab (default in dev)')
+    ap.add_argument('--debug', action='store_true',
+                    help='window mode with devtools enabled')
+    ap.add_argument('--version', action='version',
+                    version=f'Texperiment {__version__}')
     args = ap.parse_args()
 
-    app = create_app(args.main_tex, args.port, proof_engine=args.proof_engine)
-    url = f'http://{args.host}:{args.port}'
-    print(f'* TeXperiment — {len(args.main_tex)} project(s) loaded from CLI, '
-          f'restored the rest for port {args.port} from ~/.texperiment/projects.json',
-          flush=True)
-    print(f'* server available at {url}  (Ctrl+C to stop)', flush=True)
-
-    # Run uvicorn in a daemon thread so the main thread keeps Python's default
-    # signal handling — on Windows, uvicorn's own handlers can swallow Ctrl+C.
-    # Proactor sockets dropping keep-alive connections log noisy
-    # ConnectionResetError tracebacks — silence them for this loop.
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.set_exception_handler(_silence_connection_reset)
-    config = uvicorn.Config(app, host=args.host, port=args.port,
-                            log_level='warning')
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-
-    def _stop(signum, frame):
-        server.should_exit = True
-
-    signal.signal(signal.SIGINT, _stop)
-    if hasattr(signal, 'SIGBREAK'):
-        signal.signal(signal.SIGBREAK, _stop)
-    try:
-        while thread.is_alive():
-            time.sleep(0.3)
-    except KeyboardInterrupt:
-        server.should_exit = True
-        try:
-            thread.join(timeout=5)
-        except Exception:
-            pass
-    print('* server stopped', flush=True)
+    app = create_app(args.main_tex, args.port, proof_engine=args.proof_engine,
+                     engine=args.engine)
+    print(f'* TeXperiment {__version__} — {len(args.main_tex)} project(s) '
+          'loaded from CLI, restored the rest for port '
+          f'{args.port} from ~/.texperiment/projects.json', flush=True)
+    sys.exit(run(app, args.host, args.port, mode=args.mode or 'auto',
+                 debug=args.debug))
 
 
 if __name__ == '__main__':

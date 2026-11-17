@@ -6,6 +6,10 @@ import globals from 'globals';
 // mathVirtualKeyboard); the tests are ESM under vitest.
 export default [
   {
+    // vendored third-party libs (minified, pinned by sha256 manifest)
+    ignores: ['web/vendor/**'],
+  },
+  {
     files: ['web/**/*.js'],
     languageOptions: {
       sourceType: 'script',

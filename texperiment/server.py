@@ -1,13 +1,17 @@
 """FastAPI server: multi-project registry, block edit ops, raw file access,
 disk browsing, LaTeX compilation, and per-project WS live reload."""
 import asyncio
+import glob
 import json
+import os
 import re
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 import time
+import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -22,18 +26,124 @@ from .parser import parse_file
 from .proof import ProofError
 from .resolver import read_text_preserve, resolve_files
 from .storage import ConflictError, FileStore, patch
+from .version import __version__
 
-WEB_DIR = Path(__file__).resolve().parent.parent / 'web'
+
+def _web_dir() -> Path:
+    """The served web/ directory — beside the package in development,
+    inside the PyInstaller bundle when frozen."""
+    if getattr(sys, 'frozen', False):
+        base = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent))
+        cand = base / 'web'
+        if cand.is_dir():
+            return cand
+    return Path(__file__).resolve().parent.parent / 'web'
+
+
+WEB_DIR = _web_dir()
 
 NON_EDITABLE = ('preamble', 'enddoc')
+
+# -- settings (~/.texperiment/settings.json) ---------------------------------
+CONFIG_DIR = Path.home() / '.texperiment'
+
+
+def _settings_path() -> Path:
+    # resolved per call: tests monkeypatch CONFIG_DIR, and module-level
+    # constants would bypass the redirect
+    return CONFIG_DIR / 'settings.json'
+
+
+def load_settings() -> dict:
+    try:
+        return json.loads(_settings_path().read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_setting(key, value) -> None:
+    s = load_settings()
+    s[key] = value
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _settings_path().write_text(json.dumps(s, indent=1), encoding='utf-8')
+    except OSError:
+        pass  # persistence is best-effort; the editor keeps working
+
 
 IMG_EXTS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp')
 # LaTeX also happily includes vector formats the browser can't show in
 # an <img> — resolve them too, the frontend decides how to display
 GRAPHICS_EXTS = IMG_EXTS + ('.pdf', '.eps')
 
+# windowed frozen builds (console=False) have no console for children to
+# inherit: without this flag every latexmk/tectonic run would pop up a
+# terminal window for the whole compile. 0 on non-Windows (flag absent).
+_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+
+# -- TeX toolchain detection -------------------------------------------------
+# TeX installers do not always put the binaries on PATH (the TeX Live
+# installer frequently doesn't) — probe the typical locations too.
+def _tex_dir_globs():
+    if os.name != 'nt':
+        return ('/usr/local/texlive/*/bin/x86_64-linux',
+                '/opt/texlive/*/bin/x86_64-linux',
+                '/usr/local/texlive/*/bin/*')
+    pats = [r'C:\texlive\*\bin\win64', r'C:\texlive\*\bin\windows',
+            r'C:\Program Files\MiKTeX\miktex\bin\x64',
+            r'C:\Program Files (x86)\MiKTeX\miktex\bin\x64']
+    for var in ('LOCALAPPDATA', 'APPDATA'):
+        base = os.environ.get(var)
+        if base:  # unset env vars would make the pattern cwd-relative
+            pats += [os.path.join(base, 'Programs', 'MiKTeX', 'miktex',
+                                  'bin', 'x64'),
+                     os.path.join(base, 'MiKTeX', 'miktex', 'bin', 'x64')]
+    return tuple(pats)
+
+
+def _tex_dirs():
+    """Dirs where TeX distributions typically live, even off-PATH."""
+    out = []
+    for pat in _tex_dir_globs():
+        out += glob.glob(pat)
+    return sorted({d for d in out if os.path.isdir(d)})
+
+
+def _bundled_tectonic():
+    """The tectonic.exe shipped inside the app bundle, or the dev copy."""
+    exe = 'tectonic.exe' if os.name == 'nt' else 'tectonic'
+    if getattr(sys, 'frozen', False):
+        base = Path(getattr(sys, '_MEIPASS', Path(sys.executable).parent))
+        cand = base / 'tectonic' / exe
+        if cand.is_file():
+            return str(cand)
+    dev = Path(__file__).resolve().parent.parent / 'packaging' / 'tectonic' / exe
+    return str(dev) if dev.is_file() else None
+
+
+def _find_tex_tool(name):
+    """Full path of a TeX tool: PATH first, then the typical install dirs."""
+    p = shutil.which(name)
+    if p:
+        return p
+    for d in _tex_dirs():
+        cand = Path(d) / (name + ('.exe' if os.name == 'nt' else ''))
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
+def _compile_env():
+    """Subprocess env for compiles: TeX dirs that were found off-PATH are
+    prepended so latexmk finds its perl/engines beside it."""
+    env = os.environ.copy()
+    dirs = _tex_dirs()
+    if dirs:
+        env['PATH'] = os.pathsep.join(dirs + [env.get('PATH', '')])
+    return env
+
+
 # per-port project persistence: ~/.texperiment/projects.json
-CONFIG_DIR = Path.home() / '.texperiment'
 CONFIG_PATH = CONFIG_DIR / 'projects.json'
 
 
@@ -499,6 +609,10 @@ class ProofCheckBody(BaseModel):
     block_ids: list[str] | None = None
 
 
+class ProofEngineBody(BaseModel):
+    engine: str  # 'languagetool' | 'spellcheck'
+
+
 class ProofDictBody(BaseModel):
     word: str
 
@@ -572,7 +686,12 @@ def _tex_plain(s):
     return _latex_clean(s)
 
 
-def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
+def create_app(initial_mains=(), port=8080, proof_engine=None, engine='auto'):
+    """proof_engine: explicit choice ('languagetool'/'spellcheck') wins;
+    None → the persisted setting, else the languagetool default. engine:
+    LaTeX compile engine priority ('auto'/'latexmk'/'tectonic')."""
+    if proof_engine is None:
+        proof_engine = load_settings().get('proof_engine') or 'languagetool'
     # runs on app startup (uvicorn / TestClient context manager): grab the
     # event loop for broadcasts and start the file watchers
     @asynccontextmanager
@@ -587,7 +706,11 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
     projects = {}          # pid -> Project
     clients = set()        # websockets
     loop = None
-    proof_eng = proof.ENGINES[proof_engine]()
+    # dict so routes can switch the engine at runtime (/proof/engine)
+    eng_state = {'eng': proof.ENGINES[proof_engine]()}
+    engine_pref = engine  # compile engine priority (auto/latexmk/tectonic)
+    app.state.focus_cb = {'fn': None}  # desktop shell registers its raiser
+    app.state.desktop = False          # set True by texperiment/desktop.py
 
     def broadcast(msg):
         async def _send():
@@ -924,8 +1047,38 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
     @app.get('/api/project/{pid}/proof/config')
     def proof_config_route(pid: str):
         get_project(pid)
-        ok, err = proof_eng.available()
-        return {'engine': proof_eng.name, 'available': ok, 'error': err}
+        eng = eng_state['eng']
+        ok, err = eng.available()
+        out = {'engine': eng.name, 'available': ok, 'error': err}
+        if isinstance(eng, proof.LanguageToolEngine):
+            out['lt'] = eng.lt_state()
+        return out
+
+    @app.post('/api/project/{pid}/proof/install-lt')
+    def proof_install_lt_route(pid: str):
+        """User-consented LanguageTool download (~200 MB, needs Java).
+        The check endpoint never downloads on its own."""
+        get_project(pid)
+        eng = eng_state['eng']
+        if not isinstance(eng, proof.LanguageToolEngine):
+            raise HTTPException(400, 'LanguageTool is not the active engine')
+        eng.start_install()
+        return {'ok': True, 'lt': eng.lt_state()}
+
+    @app.post('/api/project/{pid}/proof/engine')
+    def proof_engine_route(pid: str, body: ProofEngineBody):
+        """Switch the proofreading engine at runtime; persisted."""
+        get_project(pid)
+        if body.engine not in proof.ENGINES:
+            raise HTTPException(400, 'unknown proofreading engine')
+        eng_state['eng'] = proof.ENGINES[body.engine]()
+        save_setting('proof_engine', body.engine)
+        eng = eng_state['eng']
+        ok, err = eng.available()
+        out = {'engine': eng.name, 'available': ok, 'error': err}
+        if isinstance(eng, proof.LanguageToolEngine):
+            out['lt'] = eng.lt_state()
+        return out
 
     @app.post('/api/project/{pid}/proof/check')
     def proof_check_route(pid: str, body: ProofCheckBody):
@@ -933,7 +1086,7 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
             raise ValueError('lang is required')
         ids = set(body.block_ids) if body.block_ids else None
         issues = _run(proof.check_blocks, get_project(pid).store,
-                      proof_eng, body.lang, ids)
+                      eng_state['eng'], body.lang, ids)
         return {'issues': issues, 'count': len(issues)}
 
     @app.post('/api/project/{pid}/proof/dictionary')
@@ -1011,25 +1164,36 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
         proj = get_project(pid)
         root = proj.store.root
         main_name = proj.store.main_path.name
-        if shutil.which('latexmk'):
+        engine = engine_pref
+        latexmk = _find_tex_tool('latexmk') if engine in ('auto', 'latexmk') else None
+        tect = _bundled_tectonic() if engine in ('auto', 'tectonic') else None
+        if latexmk:
             # -f: force past recorded errors from earlier runs — we serve the
             # best-effort PDF together with the log instead of refusing
-            cmd = ['latexmk', '-pdf', '-f', '-interaction=nonstopmode', main_name]
+            cmd = [latexmk, '-pdf', '-f', '-interaction=nonstopmode', main_name]
         elif shutil.which('pdflatex'):
             cmd = ['pdflatex', '-interaction=nonstopmode', '-halt-on-error', main_name]
+        elif tect:
+            # tectonic reruns and runs BibTeX itself; the PDF lands beside
+            # the input (no latexmkrc out_dir handling needed)
+            cmd = [tect, main_name]
         else:
             raise HTTPException(400,
                 'No TeX toolchain found — install TeX Live or MiKTeX '
-                '(needs latexmk or pdflatex on PATH).')
+                '(latexmk/pdflatex; the bundled tectonic fallback is '
+                'missing too).')
+        env = _compile_env()
         try:
             proc = subprocess.run(cmd, cwd=str(root), capture_output=True,
                                   text=True, encoding='utf-8',
-                                  errors='replace', timeout=300)
+                                  errors='replace', timeout=300, env=env,
+                                  creationflags=_NO_WINDOW)
             if cmd[0] == 'pdflatex' and proc.returncode == 0:
                 # second pass for cross references
                 subprocess.run(cmd, cwd=str(root), capture_output=True,
                                text=True, encoding='utf-8',
-                               errors='replace', timeout=300)
+                               errors='replace', timeout=300, env=env,
+                               creationflags=_NO_WINDOW)
         except subprocess.TimeoutExpired:
             raise HTTPException(500, 'Compilation timed out after 300 s.')
         except OSError as e:
@@ -1235,6 +1399,55 @@ def create_app(initial_mains=(), port=8080, proof_engine='languagetool'):
             clients.discard(ws)
         except Exception:
             clients.discard(ws)
+
+    # -- desktop-shell helpers --------------------------------------------------
+    class OpenUrlBody(BaseModel):
+        url: str
+
+    @app.get('/api/env')
+    def env_route():
+        return {'desktop': app.state.desktop, 'version': __version__,
+                'engine': engine_pref}
+
+    @app.get('/focus')
+    def focus_route():
+        """The desktop shell raises its window; a second launch hits this
+        to activate the first instance instead of failing on the port."""
+        fn = app.state.focus_cb.get('fn')
+        if fn:
+            try:
+                fn()
+            except Exception:
+                pass
+        return {'ok': True}
+
+    @app.post('/open-url')
+    def open_url_route(body: OpenUrlBody):
+        """Open an external link in the system browser — the app window
+        itself must never navigate away from the editor."""
+        u = (body.url or '').strip()
+        if not re.match(r'^https?://', u):
+            raise HTTPException(400, 'only http(s) URLs can be opened')
+        webbrowser.open(u)
+        return {'ok': True}
+
+    @app.post('/api/project/{pid}/pdf-open')
+    def pdf_open_route(pid: str):
+        """Open the compiled PDF in the system's default PDF viewer."""
+        proj = get_project(pid)
+        pdf = _pdf_path(proj)
+        if not pdf.exists():
+            raise HTTPException(404, 'No PDF yet — compile first.')
+        try:
+            if os.name == 'nt':
+                os.startfile(str(pdf))  # noqa: S606 — shell-open by design
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', str(pdf)], check=False)
+            else:
+                subprocess.run(['xdg-open', str(pdf)], check=False)
+        except OSError as e:
+            raise HTTPException(500, f'could not open the PDF: {e}')
+        return {'ok': True}
 
     # dev-friendly caching: browsers must revalidate the frontend assets
     # (etag), otherwise code changes need a hard reload to take effect
