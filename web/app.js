@@ -15,11 +15,13 @@ const state = {
   inlineEdit: null,  // in-place rendered-column editor {id, block, original, ta}
   selBlocks: [],     // multi-selection: block ids in selection order
   selAnchor: null,   // anchor id for shift+click ranges
-  sbs: localStorage.getItem('sbs') === '1', // side-by-side mode (persisted)
+  sbs: localStorage.getItem('sbs') !== '0', // side-by-side mode (persisted; default on)
   docSize: parseFloat(localStorage.getItem('doc-size')) || 17, // document font size
   browsePath: null,  // disk browser location
   collapsed: new Set(), // section block ids hidden via their chevron
   git: null,         // last /git/status payload (null = not fetched yet)
+  gitSel: new Set(), // multi-selected git file paths (click / ctrl / shift)
+  gitSelLast: null,  // anchor path for shift+click ranges
   gitChanged: new Set(), // block ids whose content differs from git HEAD
   gitHl: localStorage.getItem('git-hl') !== '0',  // highlight changes (persisted)
   gitShowDiff: localStorage.getItem('git-show-diff') === '1', // persisted
@@ -630,6 +632,19 @@ function renderInline(src, marks, git) {
       if (j < 0) j = n;
       out += `<span class="icomment">${esc(src.slice(i, j))}</span>`;
       i = j;
+    } else if (c === '{') {
+      // a bare brace group is markup, not content: {\textbf{Difference}}
+      // in a table cell renders bold WITHOUT the braces. Unclosed group
+      // (still typing): the rest of the source is the group body
+      const g = readGroup(src, i);
+      const body = g ? g.body : src.slice(i + 1);
+      const off = g ? g.bodyStart : i + 1;
+      const len = g ? g.body.length : n - off;
+      out += renderInline(body, shiftMarks(marks, off, len),
+        shiftGit(git, off, len));
+      i = g ? g.end : n;
+    } else if (c === '}') {
+      out += esc(c); i++;  // stray closing brace — keep it visible
     } else if (c === '\n' || c === '~') {
       out += ' '; i++;
     } else if (c === '&') {
@@ -754,8 +769,8 @@ function tokenizeTableBody(body) {
       const cmd = m[1];
       if (TABLE_RULE_CMDS.has(cmd)) {
         pushCell();
-        // consume the rule's [..]/{..} arguments verbatim (cline{2-3},
-        // cmidrule(lr){2-3})
+        // consume the rule's [..]/(..)/{..} arguments verbatim — cline{2-3},
+        // cmidrule(lr){2-3}; the (..) trim spec comes BEFORE the range
         let j = i + m[0].length;
         let arg = '';
         for (;;) {
@@ -765,6 +780,13 @@ function tokenizeTableBody(body) {
             const e = body.indexOf(']', j);
             if (e < 0) break;
             arg += ws[0] + body.slice(j, e + 1); j = e + 1; continue;
+          }
+          if (body[j] === '(') {
+            // \cmidrule(lr){2-5}: the parenthesised trim spec must be
+            // consumed or it leaks into the following cell's text
+            const e = body.indexOf(')', j);
+            if (e < 0) break;
+            arg += body.slice(j, e + 1); j = e + 1; continue;
           }
           if (body[j] === '{') {
             const g = groupEndAt(body, j);
@@ -1323,8 +1345,13 @@ function renderBlockContent(b) {
       const cOff = caption ? b.source.indexOf(caption) : -1;
       const cMarks = cOff >= 0 ? shiftMarks(proofMarksFor(b), cOff, caption.length) : [];
       const cGit = cOff >= 0 ? shiftGit(gitMarksFor(b), cOff, caption.length) : null;
+      // the figure's \label as a clickable chip — the global refchip
+      // handler jumps to it (labelBlock finds the block by its label)
+      const lm = /\\label\{([^{}]*)\}/.exec(b.source);
+      const lbl = lm ? lm[1].trim() : null;
       return `<figure class="blkfig">${img}` +
         (caption ? `<figcaption class="figcap">${renderInline(caption, cMarks, cGit)}</figcaption>` : '') +
+        (lbl ? `<div class="mathlabels"><span class="refchip" data-label="${esc(lbl)}" title="click to jump to this figure">label:${esc(lbl)}</span></div>` : '') +
         `</figure>`;
     }
     default:
@@ -2811,6 +2838,10 @@ function blockEl(b, hidden = false) {
   if (state.diskHl && state.diskKeys &&
       state.diskKeys.has(blockKey(b))) node.classList.add('disk-change');
   if (state.gitHl && state.gitChanged.has(b.id)) node.classList.add('git-change');
+  // staged blocks get their own left border (blue) — visually apart from
+  // changed-but-unstaged ones (green)
+  const bdd = state.gitDiff && state.gitDiff.diffs[b.id];
+  if (bdd && bdd.staged) node.classList.add('git-staged');
   if (isBlankComment(b)) node.classList.add('b-hidden');
   node.append(el('div', 'bcontent', renderBlockContent(b)));
   node.append(buildTools(b));
@@ -4736,6 +4767,8 @@ function applyOutlineGitMarks() {
 function applyGitHighlights() {
   document.querySelectorAll('#content .block').forEach(n => {
     n.classList.toggle('git-change', state.gitHl && state.gitChanged.has(n.dataset.id));
+    const dd = state.gitDiff && state.gitDiff.diffs[n.dataset.id];
+    n.classList.toggle('git-staged', !!(dd && dd.staged));
   });
 }
 
@@ -4965,6 +4998,9 @@ function renderGit() {
     panel.append(el('div', 'gitmuted', 'Working tree clean ✓'));
   }
 
+  // batch action bar for the file selection (click a row to select)
+  appendGitSelBar(panel, g);
+
   // commit helper (VS Code style): message box + commit/push
   const ta = el('textarea', 'gitmsg');
   ta.placeholder = 'Commit message (Ctrl+Enter to commit on all files)';
@@ -4977,20 +5013,27 @@ function renderGit() {
   const bar = el('div', 'gitbar');
   const commitBtn = el('button', 'edbtn primary', '✓ Commit');
   const pushBtn = el('button', 'edbtn', '⇅ Push');
+  const cpushBtn = el('button', 'edbtn', '✓⇅');
+  cpushBtn.title = 'Commit and push';
   if (state.gitBusy) {
     commitBtn.disabled = true;
     pushBtn.disabled = true;
+    cpushBtn.disabled = true;
   } else if (state.pushing) {
     pushBtn.disabled = true;
+    cpushBtn.disabled = true;
     pushBtn.innerHTML = '<span class="spin"></span> Pushing…';
     pushBtn.title = 'Push in progress';
   } else if (!g.has_remote) {
     pushBtn.disabled = true;
+    cpushBtn.disabled = true;
     pushBtn.title = 'No remote configured — add one with:\ngit remote add origin <url>';
+    cpushBtn.title = 'No remote configured';
   }
   commitBtn.onclick = () => gitCommit(ta);
   pushBtn.onclick = e => gitPush(e.currentTarget);
-  bar.append(commitBtn, pushBtn);
+  cpushBtn.onclick = () => gitCommit(ta, true);
+  bar.append(commitBtn, cpushBtn, pushBtn);
   panel.append(ta, bar);
   ta.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -5003,6 +5046,66 @@ function renderGit() {
     ta.setSelectionRange(keep.s, keep.e);
   }
   showBusyOverlay();
+}
+
+// ---- multi-selection of git files + batch actions ------------------------
+
+function allGitPaths() {
+  const g = state.git;
+  return g ? [...g.staged, ...g.unstaged, ...g.untracked] : [];
+}
+
+function toggleGitSel(p, extend) {
+  if (extend && state.gitSelLast && state.gitSelLast !== p) {
+    const paths = allGitPaths();
+    const a = paths.indexOf(state.gitSelLast), b = paths.indexOf(p);
+    if (a >= 0 && b >= 0) {
+      for (let k = Math.min(a, b); k <= Math.max(a, b); k++)
+        state.gitSel.add(paths[k]);
+      renderGit();
+      return;
+    }
+  }
+  if (state.gitSel.has(p)) state.gitSel.delete(p);
+  else state.gitSel.add(p);
+  state.gitSelLast = p;
+  renderGit();
+}
+
+function appendGitSelBar(panel, g) {
+  // drop selections whose file left the status (committed, deleted…)
+  const known = new Set(allGitPaths());
+  state.gitSel = new Set([...state.gitSel].filter(p => known.has(p)));
+  if (!state.gitSel.size) return;
+  const inStaged = [...state.gitSel].filter(p => g.staged.includes(p));
+  const inWork = [...state.gitSel].filter(p =>
+    g.unstaged.includes(p) || g.untracked.includes(p));
+  const inUnstaged = [...state.gitSel].filter(p => g.unstaged.includes(p));
+  const bar = el('div', 'gitselbar');
+  bar.append(el('span', 'gitselcount', `${state.gitSel.size} selected`));
+  const mk = (label, tip, paths, fn) => {
+    const b = el('button', 'gbtn', label);
+    b.title = tip;
+    b.disabled = !paths.length || state.gitBusy;
+    b.onclick = async () => {
+      state.gitSel.clear();   // bar closes immediately; action runs on
+      renderGit();            // the captured path list
+      await fn(paths);
+    };
+    bar.append(b);
+  };
+  mk('＋ Stage', 'Stage the selected files', inWork,
+    paths => gitPaths('stage', paths));
+  mk('⇤ Unstage', 'Unstage the selected files', inStaged,
+    paths => gitPaths('unstage', paths));
+  mk('↩ Discard', 'Discard the selected changes (asks for confirmation)',
+    inUnstaged, paths => gitDiscard(paths));
+  const clear = el('button', 'gbtn', '✕');
+  clear.title = 'Clear the selection';
+  clear.disabled = state.gitBusy;
+  clear.onclick = () => { state.gitSel.clear(); state.gitSelLast = null; renderGit(); };
+  bar.append(clear);
+  panel.append(bar);
 }
 
 function gitFileGroup(title, paths, kind, busy) {
@@ -5026,11 +5129,20 @@ function gitFileGroup(title, paths, kind, busy) {
     hbtn('↩', 'Discard ALL changes (asks for confirmation)',
       () => gitDiscard(paths.slice()));
     hbtn('＋', 'Stage all changed files', () => gitPaths('stage', paths.slice()));
+  } else if (kind === 'untracked') {
+    hbtn('＋', 'Stage all untracked files', () => gitPaths('stage', paths.slice()));
   }
   head.append(hbtns);
   wrap.append(head);
+  // click selects a file for batch actions (the selection bar above the
+  // commit box); ctrl+click toggles, shift+click extends a range
   for (const p of paths) {
-    const row = el('div', 'gitrow');
+    const row = el('div', 'gitrow' +
+      (state.gitSel.has(p) ? ' gitsel' : ''));
+    row.onclick = ev => {
+      if (ev.target.closest('button')) return;
+      toggleGitSel(p, ev.shiftKey);
+    };
     const name = el('span', 'gitpath', esc(p));
     name.title = p;
     row.append(name);
@@ -5092,12 +5204,16 @@ async function toggleBlockStage(b) {
   } catch (e) { toast('Block stage failed: ' + e.message, true); }
 }
 
-// the per-block stage button (only for blocks with a diff)
+// the per-block stage/unstage button (only for blocks with a diff).
+// DISTINCT symbols so the state is readable without hovering: '＋' means
+// the change is unstaged (click stages it), '－' means staged (click
+// unstages)
 function stageBlockButton(b) {
   const dd = state.gitDiff && state.gitDiff.diffs[b.id];
   if (!dd || !state.git || !state.git.repo) return null;
   const wrap = el('span', 'stage-block-wrap');
-  const btn = el('button', 'btools-btn stage-block' + (dd.staged ? ' staged' : ''), '⇅');
+  const btn = el('button', 'btools-btn stage-block' + (dd.staged ? ' staged' : ''),
+    dd.staged ? '－' : '＋');
   btn.title = dd.staged ? 'Unstage this block’s change'
     : 'Stage this block’s change';
   btn.onclick = ev => { ev.stopPropagation(); toggleBlockStage(b); };
@@ -5170,7 +5286,7 @@ async function gitDiscard(paths) {
     finally { gitBusyEnd(); }
 }
 
-async function gitCommit(ta) {
+async function gitCommit(ta, andPush = false) {
   const msg = ta.value.trim();
   if (!msg) { toast('Enter a commit message first', true); ta.focus(); return; }
   const g = state.git;
@@ -5194,6 +5310,9 @@ async function gitCommit(ta) {
     // committing from the diff-only view: its purpose is served — return
     // to the full document at the saved pre-diff reading position
     if (state.gitShowDiff) toggleDiffOnly();
+    // commit+push: the push runs INSIDE the busy window so the spinner
+    // covers both operations without an idle flash between them
+    if (andPush) await gitPush(null);
     toast('Committed: ' + res.summary);
   } catch (e) { toast('Commit failed: ' + e.message, true); }
     finally { gitBusyEnd(); }

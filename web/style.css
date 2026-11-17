@@ -239,6 +239,11 @@ table.rtab td, table.rtab th { border: 1px solid #999; padding: 4px 12px; font-s
   padding: 3px 7px; border-radius: 4px; color: var(--panel-ink);
 }
 .btools button:hover { background: var(--hover-bg); color: var(--accent); }
+/* per-block stage/unstage buttons: DISTINCT colors, not just a tooltip —
+   green ＋ = change unstaged (click stages), blue － = staged (click
+   unstages); the matching block border is git-change / git-staged */
+.block button.stage-block { color: #4caf6d; }
+.block button.stage-block.staged { color: #4a90d9; }
 .btools button.danger:hover { background: #fdecec; color: var(--err); }
 
 /* per-block stage button (index surgery for exactly this block) */
@@ -478,6 +483,11 @@ body.drag-active .grip { pointer-events: none; }
 .block.git-change {
   box-shadow: inset 3px 0 0 0 #4caf6d;
 }
+/* staged blocks: blue left border — visually apart from changed-but-
+   unstaged ones (green). Rule sits after .git-change so it wins. */
+.block.git-staged {
+  box-shadow: inset 3px 0 0 0 #4a90d9;
+}
 
 /* inline word-level diff inside changed blocks */
 .git-add {
@@ -561,14 +571,34 @@ body.drag-active .grip { pointer-events: none; }
 .ghbtns .gbtn { font-size: 12px; padding: 1px 5px; }
 .gitrow {
   display: flex; align-items: center; padding: 1px 8px 1px 16px;
+  cursor: pointer;  /* click selects for batch actions */
 }
 .gitrow:hover { background: #2e343d; }
+/* selected for batch actions (selection bar above the commit box) */
+.gitrow.gitsel { background: var(--toggled-bg); }
+.gitrow.gitsel .gitpath { color: #cfe3ff; }
+.gitrow.gitsel::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--accent);
+}
+.gitrow { position: relative; }
 .gitrow .gitpath {
   flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .gitrow .gbtn { opacity: .75; }
 .gitrow:hover .gbtn { opacity: 1; }
+/* batch selection bar: actions over the selected files */
+.gitselbar {
+  display: flex; align-items: center; gap: 3px; flex-wrap: wrap;
+  margin: 4px 12px; padding: 4px 8px;
+  background: var(--toggled-bg); border: 1px solid var(--toggled-border);
+  border-radius: 5px;
+}
+.gitselbar .gitselcount {
+  font-size: 11px; color: #cfe3ff; margin-right: 4px; font-weight: 600;
+}
+.gitselbar .gbtn { font-size: 11.5px; padding: 1px 6px; }
 .gitmsg {
   display: block; width: calc(100% - 32px); margin: 6px 16px 0;
   background: #2e343d; color: #fff; border: 1px solid #3c434e; border-radius: 5px;
@@ -994,15 +1024,17 @@ tr.rulegap td:hover .ruleadd { display: inline; }
 }
 .sbsl:hover .insertline { opacity: 1; pointer-events: auto; }
 /* git busy: spinner floats over the whole Source Control section — the
-   panel keeps its size, so the sidebar does not jump around */
+   panel keeps its size and stays (dimmed) visible underneath */
 #gitSection { position: relative; }
 .gitbusy {
   position: absolute; inset: 0; z-index: 5;
   display: flex; align-items: center; justify-content: center; gap: 8px;
-  background: var(--side);
+  background: color-mix(in srgb, var(--side) 55%, transparent);
   border-radius: 5px;
-  font-size: 12px; color: var(--side-ink);
+  font-size: 12px; font-weight: 600; color: var(--side-ink);
+  text-shadow: 0 1px 2px var(--side);
 }
+.gitbusy .spin { border-top-color: var(--side-ink); }
 .gbtn:disabled, .gitgrouphead .gbtn:disabled { opacity: .4; cursor: default; }
 /* section headings carry their own top margin — offset the raw text to
    match the rendered heading line */
