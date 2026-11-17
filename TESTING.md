@@ -303,7 +303,11 @@ surrounding code — entries move out when fixed:
     toggle-back, the sbs toggle-off sometimes does not unmount the raw
     segments, one E2E run saw a view update missing after an inline
     commit, and (once) a hover-toolbar ✎ click hung on actionability.
-    All retry-recoverable; zero hard failures across recent full-suite
-    loops. These look like `enqueueOp`/`applyDoc`/`ceRender`
-    interleavings — a focused editor-state pass (with the E2E flaky
-    counter as the progress metric) is the suggested next step.
+    CI (slower than local) also exposed element churn: clicking inside
+    the inline editor while the caret tracker rebuilds its DOM detaches
+    the click target in a retry loop. The smoke suite now avoids
+    interacting mid-rebuild (settle beat before select-all; no chip
+    clicks; the `enterSbsMode` helper retries the toggle) and is 5/5
+    clean locally — the underlying `enqueueOp`/`applyDoc`/`ceRender`
+    interleavings are still there and worth a focused pass, with the
+    E2E flaky counter as the progress metric.

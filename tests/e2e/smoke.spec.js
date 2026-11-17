@@ -145,7 +145,7 @@ test('select-all + type in the inline editor replaces the paragraph',
   async ({page}) => {
     await page.goto(srv.baseUrl);
     // order-independent: ch1's first \texttt paragraph is untouched by
-    // the other tests and always provides a rendered command chip
+    // the other tests
     const doc = await currentDoc(srv);
     const para = doc.blocks.find(
       b => b.file === 'chapters/ch1.tex' && b.type === 'paragraph' &&
@@ -155,12 +155,11 @@ test('select-all + type in the inline editor replaces the paragraph',
     await block.dblclick();
     const ce = block.locator('.inline-ce');
     await ce.waitFor({state: 'visible'});
-    // deterministically enter the raw-mode state first: click right on a
-    // rendered command chip (\texttt → <code>) so the caret tracker
-    // flips it to raw; the regression (TESTING.md #13) is that a
-    // following select-all gets destroyed by the tracker's rebuild
-    await block.locator('.inline-ce code').first().click();
-    await block.locator('.inline-ce .tok-raw').waitFor({state: 'visible'});
+    // let the caret tracker's post-open rebuild settle before selecting —
+    // CI timing showed element churn when interacting mid-rebuild (#14)
+    await page.waitForTimeout(250);
+    // the regression (TESTING.md #13): select-all must survive the caret
+    // tracker, and typing must REPLACE rather than prepend
     await page.keyboard.press('Control+A');
     await page.keyboard.type('Chapter one, replaced by select-all.',
       {delay: 5});
