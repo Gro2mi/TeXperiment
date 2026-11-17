@@ -37,9 +37,28 @@ async function currentDoc(srv) {
 // hover-toolbar textarea) both have timing-sensitive caret/selection/
 // hover behavior — TESTING.md register #13/#14 — and are not what the
 // smoke suite rides on.
+// the sbs toggle must actually activate before the suite proceeds — on a
+// slow CI runner the first click can race the app's async init
+async function enterSbsMode(page) {
+  // the toolbar listener exists from the start, but the initial render is
+  // async: wait for it so the click lands on a settled DOM
+  await page.waitForFunction(
+    () => document.querySelectorAll('#content .block').length > 10,
+    null, {timeout: 15000});
+  for (let i = 0; i < 3; i++) {
+    await page.locator('#sbsbtn').click();
+    try {
+      await page.locator('.sbsrow').first()
+        .waitFor({state: 'visible', timeout: 3000});
+      return;
+    } catch (e) { /* click swallowed or render slow — try once more */ }
+  }
+  throw new Error('side-by-side mode did not activate after 3 clicks');
+}
+
 async function editBlockViaRawColumn(page, rel, blockId, oldSource,
                                      newSource) {
-  await page.locator('#sbsbtn').click();
+  await enterSbsMode(page);
   const seg = page.locator(
     `.sbsfileseg[data-file="${rel}"][data-block-id="${blockId}"]`);
   await seg.waitFor({state: 'visible'});
@@ -171,7 +190,7 @@ test('an external file edit reloads the document over the websocket',
 
 test('side-by-side mode shows the raw source column', async ({page}) => {
   await page.goto(srv.baseUrl);
-  await page.locator('#sbsbtn').click();
+  await enterSbsMode(page);
   // raw file segments appear with their data-file attributes
   const seg = page.locator('.sbsfileseg[data-file]');
   expect(await seg.count()).toBeGreaterThan(2);

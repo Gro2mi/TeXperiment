@@ -317,6 +317,18 @@ def test_block_diffs_crlf_word_offsets(store):
     # 2e1d390 flavor: on this CRLF worktree the add ranges must index
     # into the raw current source (counting \r as a character)
     rel = 'chapters/ch2.tex'
+    # the CI runner checks out LF (no autocrlf there) — create the CRLF
+    # condition explicitly so the test is platform-independent. Blob and
+    # worktree both become CRLF: same scenario as a Windows checkout.
+    # (A Windows checkout is already CRLF — nothing to rewrite there.)
+    p = store.root / rel
+    before = p.read_bytes()
+    after = before.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+    if after != before:
+        p.write_bytes(after)
+        store.rebuild()  # block spans/sources must match the new bytes
+        git(store.root, 'add', '-A')
+        git(store.root, 'commit', '-m', 'crlf worktree')
     assert b'\r\n' in worktree_bytes(store, rel)  # precondition (raw bytes)
     b = find_block(store, 'Chapter two arrives', file=rel)
     store.op_save(b['id'], b['source'].replace(

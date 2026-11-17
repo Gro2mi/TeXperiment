@@ -6320,17 +6320,9 @@ api('/api/env').then(env => { state.desktop = !!env.desktop; })
     posTimer = setTimeout(saveReadPos, 800);
   });
   window.addEventListener('beforeunload', saveReadPos);
-  try {
-    state.projects = await api('/api/projects');
-  } catch (e) { /* server error shown via refresh */ }
-  await refreshProjects();
-  refreshGit();
-  loadProofConfig();
-  refreshBib();
-  initProofHover();
-  watchMathLibs();
-  // keep the source-control panel current even without local edits
-  setInterval(() => { if (state.project && !document.hidden) refreshGit(); }, 30000);
+  // toolbar wiring happens BEFORE the async project load: a click during
+  // startup (slow server, CI runner) must never be swallowed because the
+  // listener was not attached yet
   $('#undobtn').addEventListener('click', doUndo);
   $('#redobtn').addEventListener('click', doRedo);
   $('#themebtn').addEventListener('click', () =>
@@ -6347,7 +6339,6 @@ api('/api/env').then(env => { state.desktop = !!env.desktop; })
     try { localStorage.setItem('doc-size', String(state.docSize)); } catch (e) {}
     applyDocSize();
   });
-  // side-by-side toggle (rendered left / raw source right)
   const sbsbtn = $('#sbsbtn');
   sbsbtn.classList.toggle('toggled', state.sbs);
   sbsbtn.addEventListener('click', () => {
@@ -6359,6 +6350,17 @@ api('/api/env').then(env => { state.desktop = !!env.desktop; })
     sbsbtn.classList.toggle('toggled', state.sbs);
     renderContentPreservingScroll();
   });
+  try {
+    state.projects = await api('/api/projects');
+  } catch (e) { /* server error shown via refresh */ }
+  await refreshProjects();
+  refreshGit();
+  loadProofConfig();
+  refreshBib();
+  initProofHover();
+  watchMathLibs();
+  // keep the source-control panel current even without local edits
+  setInterval(() => { if (state.project && !document.hidden) refreshGit(); }, 30000);
   // inline editing: the caret entering/leaving a command shows/hides its
   // raw source (the rest of the text stays rendered). Entering places the
   // caret directly in the command's first argument
@@ -6386,6 +6388,11 @@ api('/api/env').then(env => { state.desktop = !!env.desktop; })
         ref.active = null;
         ceRender(ref);
         if (!tryActivateCommandAt(ref, off)) cePlaceCaret(ref, off);
+        // pin to the POST-render reality: the rebuild can shift how the
+        // same caret position measures (different token metrics). Without
+        // the re-read, a ±1 drift oscillates rebuild ↔ measure forever
+        // (observed on headless Linux font metrics)
+        ref.lastOff = ceCaretSource(ref);
       }
       return;
     }
