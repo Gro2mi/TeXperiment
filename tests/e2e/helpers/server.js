@@ -70,7 +70,7 @@ export async function startServer() {
 
   const baseUrl = `http://127.0.0.1:${port}`;
   try {
-    await waitReady(baseUrl, 20000);
+    await waitReady(baseUrl, 30000);
   } catch (e) {
     proc.kill();
     throw new Error(`server startup failed:\n${log}`, {cause: e});

@@ -28,16 +28,23 @@ async function currentDoc(srv) {
   return (await fetch(`${srv.baseUrl}/api/project/${srv.pid}/doc`)).json();
 }
 
-// Barrier for edit tests: the app runs several async chains after load
-// (WS-onopen doc refresh + applyDoc re-render, git, bibliography, and a
-// proofreading auto-check whose squiggle render can eject an open
-// editor). On slow CI runners those land mid-edit and destroy the edit,
-// so: stub the proof check away (it has its own M3 API coverage) and
-// wait for the network to go idle before touching the DOM.
-async function settleForEditing(page) {
+// The app runs several async chains after load (WS-onopen doc refresh +
+// applyDoc re-render, git, bibliography, and a proofreading auto-check
+// whose squiggle render can eject an open editor). On slow CI runners
+// those land mid-edit and destroy the edit. Two-part barrier:
+//
+//  - stubProof(page): BEFORE page.goto — routes must exist before
+//    navigation or the load-time proof request escapes the stub (that
+//    is exactly how CI kept failing while local runs passed)
+//  - settleForEditing(page): AFTER page.goto — wait for the network to
+//    go idle so every load-time chain has finished re-rendering
+async function stubProof(page) {
   await page.route('**/api/project/*/proof/check', r =>
     r.fulfill({contentType: 'application/json',
       body: JSON.stringify({issues: [], count: 0})}));
+}
+
+async function settleForEditing(page) {
   await page.waitForLoadState('networkidle');
   await page.waitForTimeout(300);
 }
@@ -101,6 +108,7 @@ async function editBlockViaRawColumn(page, rel, blockId, oldSource,
 
 test('an edit through the raw column writes through to the .tex on disk',
   async ({page}) => {
+    await stubProof(page);
     await page.goto(srv.baseUrl);
     // replace the chapter-two opening paragraph via the raw editor
     const doc = await currentDoc(srv);
@@ -126,6 +134,7 @@ test('the git panel reports the changed file', async ({page}) => {
 });
 
 test('undo reverts the edit in the view and on disk', async ({page}) => {
+  await stubProof(page);
   await page.goto(srv.baseUrl);
   // order-independent: edit the first ch2 paragraph as it is RIGHT NOW,
   // and require undo to restore the exact pre-edit bytes
@@ -158,6 +167,7 @@ test('undo reverts the edit in the view and on disk', async ({page}) => {
 
 test('select-all + type in the inline editor replaces the paragraph',
   async ({page}) => {
+    await stubProof(page);
     await page.goto(srv.baseUrl);
     // order-independent: ch1's first \texttt paragraph is untouched by
     // the other tests
@@ -165,6 +175,7 @@ test('select-all + type in the inline editor replaces the paragraph',
     const para = doc.blocks.find(
       b => b.file === 'chapters/ch1.tex' && b.type === 'paragraph' &&
            b.source.includes('\\texttt{'));
+    expect(para, 'target paragraph exists').toBeDefined();
     const oldPrefix = para.source.slice(0, 18);
     const block = page.locator(`.block[data-id="${para.id}"]`);
     await settleForEditing(page);
@@ -192,6 +203,7 @@ test('select-all + type in the inline editor replaces the paragraph',
 
 test('an external file edit reloads the document over the websocket',
   async ({page}) => {
+    await stubProof(page);
     await page.goto(srv.baseUrl);
     await settleForEditing(page);
     // a page reload would wipe this marker; it must still be set after
