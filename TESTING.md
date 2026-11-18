@@ -202,25 +202,61 @@ the starlette TestClient warning by installing `httpx2`
 
 `npm run test:e2e` — Playwright (chromium, 1 worker, 1 retry) against the
 real `python -m texperiment` server spawned on a free port with a throwaway
-git-initialized copy of `demo/` and an isolated HOME (the spawned app never
-touches the real `~/.texperiment`). Six tests / ~14 assertions:
+git-initialized copy of `demo/` (repo-local identity — the isolated HOME
+has no gitconfig, so the app's own commits would fail without it) and an
+isolated HOME (the spawned app never touches the real `~/.texperiment`).
+24 tests in four groups:
 
-- the document renders and the WebSocket connects (connection pill,
-  block count, real content through the renderer)
-- an edit through the raw side-by-side column writes through to the
-  `.tex` on disk (toggle → per-block contenteditable → toggle-back
-  commit → PUT), verified in the rendered view and in the file bytes
-- the git panel reports the changed file
-- undo reverts the edit byte-for-byte in view and on disk (order-
-  independent: it edits whatever the first ch2 paragraph currently is)
-- an external file edit triggers the live WS reload without a page
-  reload (a window marker proves no navigation happened)
-- side-by-side mode shows the raw source column
+**Core loop**: render + WS connect; raw-column edit → disk; git panel
+reports the change; undo byte-for-byte; the select-all regression
+(register #13); external reload over WS without page navigation; sbs
+toggle.
 
-The block-level editors were deliberately *not* chosen as the edit path:
-driving them exposed real client-side races (register #13/#14). The suite
-fails fast (8 s bounds) and retries once; Playwright's flaky counter makes
-how often the races strike visible per run.
+**Editor operations**: insert via the ＋ menu (hover-revealed;
+dispatchEvent — a real click opens the menu under the cursor and breaks
+its own mouseup); delete via the hover toolbar with its confirm()
+dialog; move ↓/↑ verified by disk order; Escape cancels the inline
+editor without saving; the grid editor rewrites table cells (located by
+textarea *value* — cells are set via .value and have no text nodes);
+the math editor's LaTeX-source pane; autocomplete (`\se` → popup →
+Enter inserts `\section{`).
+
+**Rendering**: inline math renders through KaTeX and the figure `<img>`
+decodes real bytes; the section collapse chevron hides ≥2 blocks and
+restores them (collapsed blocks are display:none — assert DOM presence,
+not visibility); clicking an outline entry scrolls the section into
+view.
+
+**Proof / compile / chrome / git**: proofreading end-to-end (planted
+misspelling → squiggle row → chip fix rewrites the block on disk; the
+proof route is NOT stubbed here — and the client doc must catch up to
+the API-made edit over WS *before* checking, since flagged offsets map
+onto the client doc, and the load-time auto-check must have released
+its `checking` guard or the button click is swallowed); failing compile
+shows the log overlay (route-stubbed 400); theme + font size persist
+across reloads; git stage → unstage → commit cycle verified via
+`git log`; the multi-select batch bar (`＋ Stage` — case-insensitive
+hasText would also match `⇤ Unstage`); per-block stage ＋/－ toggling
+verified via `git diff --cached`; the diff modal opens and closes.
+
+Determinism rules (each earned in CI):
+- route stubs go in **before `page.goto`** — the proofreading auto-check
+  fires during load and routes only intercept later requests
+- `settleForEditing` (networkidle + settle beat) after goto;
+  `exitSbsMode` for tests needing the rendered-only DOM (the app
+  defaults to side-by-side)
+- hover-revealed controls (`.btools`, `.insertbtn`, `.stage-in-block`)
+  need an explicit `hover()` first; popup-under-cursor and unstable
+  buttons get `dispatchEvent('click')`
+- editors open via the toolbar ✎ button — synthetic dblclick is
+  swallowed by the block-selection click handler (probe-verified)
+- app-globals assertions use string-form `waitForFunction` (eslint
+  no-undef inside evaluate callbacks)
+
+The block-level editors were deliberately *not* driven by dblclick: that
+exposed real client-side races (register #13/#14). The suite fails fast
+(8 s bounds) and retries once; Playwright's flaky counter makes how
+often the races strike visible per run.
 
 CI runs the e2e job on ubuntu with `playwright install --with-deps
 chromium`.
@@ -312,3 +348,25 @@ surrounding code — entries move out when fixed:
     user-facing hazard — a slow machine + fast typing loses edits the
     same way; the proper fix is an editor-aware applyDoc that preserves
     an open editor instead of re-rendering under it.
+15. **Fixed** (editor pass): (c) is fixed — this was the select-all e2e
+    failing only on the ubuntu runner while passing locally. Three
+    ejection paths, all closed: (i) `rerenderContentPreservingScroll`
+    only guarded `state.edit`, so the proof auto-check's `finally`
+    re-render (which runs **even with zero issues** — the e2e proof stub
+    emptied the squiggles but not the re-render), the bibliography
+    refresh, the git-diff re-render and the graphics refresh all tore
+    down an open inline editor mid-typing; it now defers while
+    `state.inlineEdit` is open too, and `commitInlineEdit` /
+    `cancelInlineEdit` flush the deferral (as `closeEditor` already did).
+    (ii) `applyDoc`'s editor preservation called `cePlaceCaret` on the
+    still-null `state.inlineEdit` because `openInlineEdit` queues — the
+    throw was swallowed by `refreshDoc`'s try/catch into a bogus
+    "Cannot load document" toast and the caret was never restored; the
+    caret now travels into the queued open. (iii) the WS-onopen chain
+    called `discardStaleEditState()` on the FIRST connect too — when a
+    slow machine's late handshake lands mid-edit, that discard is what
+    actually ejected the editor; first connects now skip it (the doc
+    that chain loads is fresh), genuine reconnects keep it. Proven with
+    a deterministic mid-edit repro: `refreshBib()` / `checkDocument()`
+    fired while the editor held typed text ejected it pre-fix and are
+    survival-tested post-fix (temporary repro, deleted after the run).

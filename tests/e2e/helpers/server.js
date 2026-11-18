@@ -29,9 +29,10 @@ function freePort() {
 }
 
 function git(dir, ...args) {
-  execFileSync('git', ['-c', 'user.email=e2e@test', '-c', 'user.name=E2E',
-                       '-c', 'core.autocrlf=false', ...args],
-               {cwd: dir, stdio: 'pipe'});
+  return execFileSync('git',
+    ['-c', 'user.email=e2e@test', '-c', 'user.name=E2E',
+     '-c', 'core.autocrlf=false', ...args],
+    {cwd: dir, stdio: 'pipe'}).toString();
 }
 
 async function waitReady(baseUrl, timeoutMs) {
@@ -52,6 +53,11 @@ export async function startServer() {
   cpSync(demoDir, projDir, {recursive: true,
     filter: (src) => !JUNK.test(src)});
   git(projDir, 'init', '-b', 'main');
+  // repo-LOCAL identity: the spawned server runs with an isolated HOME
+  // (no ~/.gitconfig), so the app's own commits would fail with
+  // "Author identity unknown" without this
+  git(projDir, 'config', 'user.email', 'e2e@test');
+  git(projDir, 'config', 'user.name', 'E2E');
   git(projDir, 'add', '-A');
   git(projDir, 'commit', '-m', 'initial');
 
@@ -100,6 +106,9 @@ export async function startServer() {
     },
     fileExists(rel) {
       return existsSync(join(projDir, rel));
+    },
+    git(...args) {
+      return git(projDir, ...args);
     },
     async stop() {
       proc.kill();
