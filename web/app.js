@@ -4972,6 +4972,13 @@ async function refreshGit() {
   // git work in flight: status/changes are refreshed but the panel is not
   // rebuilt (it shows the busy banner) and blocks are not re-rendered
   if (state.gitBusy) return;
+  // the panel is wiped and rebuilt from scratch — skip when nothing it
+  // shows has changed, or a background refresh (30s ticker, save
+  // triggers) replaces its buttons under the pointer and eats clicks
+  const sig = JSON.stringify([state.project, state.git, state.gitHl,
+    state.gitShowDiff, state.diskHl, state.pushing,
+    [...state.gitSel], state.gitMsgDraft]);
+  if (sig === _gitPanelSig) return;
   renderGit();
   // inline diff marks and ghosts live in the rendered blocks — re-render
   // when the diff actually changed (not on every status refresh); the diff
@@ -5086,6 +5093,8 @@ function toggleDiffOnly() {
     if (n) content.scrollTop += n.offsetTop - prevOffset;
   }
 }
+
+let _gitPanelSig = null;  // inputs renderGit was last built from
 
 function renderGit() {
   const panel = $('#gitpanel');
@@ -5211,6 +5220,11 @@ function renderGit() {
     ta.setSelectionRange(keep.s, keep.e);
   }
   showBusyOverlay();
+  // remember what the panel was built from — refreshGit skips the
+  // rebuild when nothing in this signature changed
+  _gitPanelSig = JSON.stringify([state.project, state.git, state.gitHl,
+    state.gitShowDiff, state.diskHl, state.pushing,
+    [...state.gitSel], state.gitMsgDraft]);
 }
 
 // ---- multi-selection of git files + batch actions ------------------------

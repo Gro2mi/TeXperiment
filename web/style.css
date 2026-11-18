@@ -230,7 +230,7 @@ sup.fn::before { content: "("; } sup.fn::after { content: ")"; }
 blockquote { border-left: 3px solid var(--panel-line); margin: .8em 0; padding: .2em 1em; color: var(--panel-ink); }
 
 table.rtab { border-collapse: collapse; margin: 1em auto; }
-table.rtab td, table.rtab th { border: 1px solid #999; padding: 4px 12px; font-size: .92em; }
+table.rtab td, table.rtab th { border: 1px solid var(--panel-line); padding: 4px 12px; font-size: .92em; }
 
 .figimg { max-width: 80%; display: block; margin: .8em auto .2em; border: 1px solid var(--line); }
 .figcap { text-align: center; font-size: .88em; color: var(--muted); margin-bottom: .8em; }
@@ -383,8 +383,13 @@ figure.blkfig { margin: 1em 0; }
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; text-align: left;
 }
-#projlist .ptools { display: none; gap: 3px; flex: none; }
-#projlist .pitem:hover .ptools { display: inline-flex; }
+/* visibility, not display: the buttons keep their layout box, so the
+   hover reveal never shifts the row — a reflow under the pointer eats
+   the click the user was already aiming */
+#projlist .ptools {
+  display: inline-flex; visibility: hidden; gap: 3px; flex: none;
+}
+#projlist .pitem:hover .ptools { visibility: visible; }
 .ptoolbtn {
   background: #2e343d; color: var(--side-ink); border: 1px solid #3c434e;
   border-radius: 4px; cursor: pointer; font-size: 10px; padding: 2px 6px;
@@ -478,7 +483,13 @@ body.drag-active .grip { pointer-events: none; }
   pointer-events: none; opacity: 0; transition: opacity .12s;
   padding: 0;
 }
-.insertline:hover .insertbtn { opacity: 1; color: var(--accent); border-color: var(--accent); }
+/* pointer-events when visible: the pill the user sees is the thing
+   that receives the click (it used to stay none, so hits fell through
+   to the line and tools targeting the pill saw them intercepted) */
+.insertline:hover .insertbtn {
+  opacity: 1; pointer-events: auto;
+  color: var(--accent); border-color: var(--accent);
+}
 
 /* ---------- external changes from disk ---------- */
 .block.disk-change {

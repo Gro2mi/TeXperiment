@@ -279,16 +279,16 @@ test('inserting a block via the ＋ menu writes it to disk', async ({page}) => {
   await settleForEditing(page);
   await exitSbsMode(page);
   // the insertline directly after a known main.tex paragraph; the ＋
-  // button is opacity:0 until the line is hovered. [1]: following-sibling
+  // pill is opacity:0 until the line is hovered. [1]: following-sibling
   // selects ALL later siblings — take the first.
   const after = page.locator('.block.b-paragraph',
     {hasText: 'The editor understands sectioning'});
   const line = after.locator(
     'xpath=following-sibling::div[contains(@class,"insertline")][1]');
   await line.hover();
-  // dispatchEvent: a real click opens the menu UNDER the cursor, which
-  // then covers the button and breaks the click's own mouseup
-  await line.locator('span.insertbtn').dispatchEvent('click');
+  // a REAL click on the visible pill: it used to be pointer-events:none,
+  // so the click never landed (regression for the missed-click fix)
+  await line.locator('span.insertbtn').click();
   await page.locator('#insertmenu button',
     {hasText: 'Display equation'}).click();
   await page.locator('.block.editing .editor')
@@ -721,3 +721,63 @@ test('the git diff modal opens and closes', async ({page}) => {
   await page.locator('#gitmodal button.edbtn', {hasText: 'Close'}).click();
   await expect(page.locator('#gitmodal')).toBeHidden({timeout: 8000});
 });
+
+// =====================================================================
+// Missed-click regressions (register #14)
+// =====================================================================
+
+test('hovering a project row reveals its buttons without shifting them',
+  async ({page}) => {
+    await stubProof(page);
+    // deterministic compile error: the real click below must not depend
+    // on a TeX toolchain
+    await page.route(/\/api\/project\/[^/]+\/compile$/, r => r.fulfill({
+      status: 400, contentType: 'application/json',
+      body: JSON.stringify({detail: 'e2e: simulated compile failure'})}));
+    await page.goto(srv.baseUrl);
+    await settleForEditing(page);
+    const row = page.locator('#projlist .pitem').first();
+    const pdf = row.locator('button.ptoolbtn', {hasText: 'PDF'});
+    // the buttons exist in layout BEFORE the hover — a display:none
+    // reveal pops them in and shifts the row under the pointer, eating
+    // the click (red: boundingBox was null pre-fix)
+    const before = await pdf.boundingBox();
+    expect(before, 'PDF button has a pre-hover layout box').not.toBeNull();
+    await row.hover();
+    const after = await pdf.boundingBox();
+    expect(after).toEqual(before);
+    // a REAL click on the revealed button lands
+    await pdf.click();
+    await expect(page.locator('#compilelog')).toBeVisible({timeout: 10000});
+    await expect(page.locator('#compilelog'))
+      .toContainText('simulated compile failure', {timeout: 8000});
+  });
+
+test('the git panel survives an unchanged refresh without rebuilding',
+  async ({page}) => {
+    await stubProof(page);
+    await page.goto(srv.baseUrl);
+    await settleForEditing(page);
+    // tag the current commit button node, then force a status refresh —
+    // with nothing changed, the panel must keep the SAME nodes (an
+    // innerHTML rebuild under the pointer eats clicks)
+    await page.evaluate(() => {
+      const b = document.querySelector('#gitpanel button.edbtn.primary');
+      b.dataset.e2eMarker = 'keep-me';
+    });
+    // wait for the WHOLE refresh round-trip (blockdiffs is the last
+    // fetch before the rebuild) — an immediate check would race the
+    // still-pending rebuild and pass vacuously
+    const [resp] = await Promise.all([
+      page.waitForResponse(r => /\/git\/blockdiffs/.test(r.url())),
+      page.locator('#gitpanel .githead button.gbtn', {hasText: '↻'})
+        .click(),
+    ]);
+    expect(resp.status()).toBe(200);
+    await page.waitForTimeout(600);   // the rebuild lands after the fetches
+    const marker = await page.evaluate(() =>
+      document.querySelector('#gitpanel button.edbtn.primary')
+        ?.dataset.e2eMarker || 'gone');
+    expect(marker, 'panel nodes survive an unchanged refresh')
+      .toBe('keep-me');
+  });

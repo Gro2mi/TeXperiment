@@ -370,3 +370,20 @@ surrounding code — entries move out when fixed:
     a deterministic mid-edit repro: `refreshBib()` / `checkDocument()`
     fired while the editor held typed text ejected it pre-fix and are
     survival-tested post-fix (temporary repro, deleted after the run).
+16. **Fixed** (missed-click pass): three hover/refresh behaviors that ate
+    clicks — all found by driving the UI in the e2e suite, all red-tested
+    first. (a) `.ptools` (project-row PDF/remove buttons) revealed with
+    `display:none → inline-flex`, reflowing the row under the pointer as
+    it arrived — the reveal now uses `visibility`, buttons keep their
+    layout box, nothing shifts. (b) `.insertbtn` kept
+    `pointer-events: none` even while visibly hovered, so hits fell
+    through to the line; the visible pill now receives the click.
+    (c) `refreshGit` rebuilt `#gitpanel` (full innerHTML wipe) on every
+    trigger — the 30s ticker, each save, each WS-open — replacing its
+    buttons under the pointer; it now compares a signature of the
+    panel's inputs (`_gitPanelSig`) and skips identical rebuilds
+    (explicit toggles still render, since they change the inputs).
+    Regression tests: real-click insert, hover-stability + real PDF
+    click, and panel node identity across an unchanged refresh (the
+    poll-based first draft passed vacuously — an immediate check races
+    the still-pending rebuild; it now waits out the whole fetch chain).
