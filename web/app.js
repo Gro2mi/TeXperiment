@@ -62,11 +62,23 @@ function el(tag, cls, html) {
 
 function toast(msg, isErr = false) {
   const t = $('#toast');
-  t.textContent = msg;
-  t.classList.toggle('err', isErr);
-  t.classList.remove('hidden');
   clearTimeout(toast._h);
-  toast._h = setTimeout(() => t.classList.add('hidden'), 3500);
+  t.textContent = msg;
+  t.classList.toggle('err', !!isErr);
+  // an error relayed from the server (callers pass the caught Error
+  // object) never auto-hides: server messages can be long (a 503 lock
+  // hint, a git failure) and vanish too fast to read — they stay until
+  // the ✕ is clicked. Client-side hints (plain `true`) keep the fade.
+  if (isErr && typeof isErr === 'object') {
+    const x = el('button', 'toast-x', '✕');
+    x.title = 'Dismiss';
+    x.setAttribute('aria-label', 'Dismiss error');
+    x.onclick = () => t.classList.add('hidden');
+    t.append(x);
+  } else {
+    toast._h = setTimeout(() => t.classList.add('hidden'), 3500);
+  }
+  t.classList.remove('hidden');
 }
 
 function banner(msg) {
@@ -1627,7 +1639,7 @@ function renderSidebar() {
         ppost(`/block/${d.id}/move`, mv).then(res => {
           applyDoc(res.doc);
           toast('Section moved');
-        }).catch(err => toast('Move failed: ' + err.message, true));
+        }).catch(err => toast('Move failed: ' + err.message, err));
       });
     }
     item.onclick = ev => {
@@ -2007,7 +2019,7 @@ function commitRawFile(path) {
       applyDoc(res.doc);
       toast('File saved');
     } catch (e) {
-      toast('Save failed: ' + e.message, true);
+      toast('Save failed: ' + e.message, e);
       rerenderContentPreservingScroll();
     }
   });
@@ -2948,7 +2960,7 @@ function moveSelectedBlocks(targetId, before) {
       applySelectionClasses();
       toast(bids.length === 1 ? 'Block moved'
         : `Moved ${bids.length} blocks`);
-    } catch (e) { toast('Move failed: ' + e.message, true); }
+    } catch (e) { toast('Move failed: ' + e.message, e); }
   });
 }
 
@@ -3016,13 +3028,40 @@ function blockEl(b, hidden = false) {
     selectBlock(b, mode);
   });
   if (EDITABLE.has(b.type)) {
-    // double-click edits; single click stays free for text marking.
-    // in side-by-side mode prose blocks edit in place, styled as rendered
+    // double-click edits; in side-by-side mode rendered prose blocks also
+    // edit on a SINGLE plain click — but a drag (text marking) must still
+    // select the rendered text, so the pointer must not have moved between
+    // press and release. Modifiers keep their other meanings (shift
+    // extends the browser selection, ctrl/cmd stay reserved)
+    let sbsDownXY = null;
+    node.addEventListener('mousedown', ev => {
+      sbsDownXY = (state.sbs && ev.button === 0 &&
+        (b.type === 'paragraph' || b.type === 'comment'))
+        ? [ev.clientX, ev.clientY] : null;
+    });
+    node.addEventListener('click', ev => {
+      if (!state.sbs || (b.type !== 'paragraph' && b.type !== 'comment') ||
+          ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
+      if (ev.target.closest('.editor') || ev.target.closest('.inline-ce') ||
+          ev.target.closest('.btools') || ev.target.closest('.grip') ||
+          ev.target.closest('a') || ev.target.closest('.stage-block-wrap') ||
+          ev.target.closest('.refchip')) return;
+      if (!sbsDownXY) return;   // the drag started outside this block
+      if (Math.hypot(ev.clientX - sbsDownXY[0],
+                     ev.clientY - sbsDownXY[1]) > 4) return;
+      sbsDownXY = null;
+      ev.preventDefault();
+      openInlineEdit(b, ev);
+    });
     node.addEventListener('dblclick', ev => {
       if (ev.target.closest('.editor') || ev.target.closest('.inline-ce') ||
           ev.target.closest('.btools') ||
           ev.target.closest('.grip') || ev.target.closest('a')) return;
       if (b.type === 'paragraph' || b.type === 'comment') {
+        // sbs: the single click above already opened the editor — the
+        // second click lands inside the inline editor and hits the
+        // guard above; this path stays for non-sbs mode
+        if (state.sbs) return;
         window.__dlog = (window.__dlog || []);
         window.__dlog.push('sbs-open ' + b.id);
         openInlineEdit(b, ev);
@@ -3166,7 +3205,7 @@ async function moveBlockFn(b, direction, positions) {
     const res = await ppost(`/block/${b.id}/move`, {direction, positions});
     applyDoc(res.doc);
   } catch (e) {
-    if (e.status === 400) toast(e.message, true);
+    if (e.status === 400) toast(e.message, e);
     else handleOpError(e, b);
   }
 }
@@ -3187,9 +3226,9 @@ function handleOpError(e, b) {
       : 'This block no longer exists — the document changed on disk. Reloading from disk…');
     if (b) markStale(b.id);
     if (e.status === 404) setTimeout(refreshDoc, 400);
-    toast('Save failed: document changed on disk', true);
+    toast('Save failed: document changed on disk', e);
   } else {
-    toast('Error: ' + e.message, true);
+    toast('Error: ' + e.message, e);
   }
 }
 
@@ -3337,7 +3376,7 @@ async function expandEditorToSection(b) {
   try {
     sec = await papi(`/block/${b.id}/section`);
   } catch (e) {
-    toast(e.message, true);
+    toast(e.message, e);
     return;
   }
   if (!state.edit || state.edit.id !== b.id) return; // closed in the meantime
@@ -4590,7 +4629,7 @@ function showInsertMenu(b, ev) {
           }
         }
         toast(label + ' inserted');
-      } catch (e) { toast('Insert failed: ' + e.message, true); }
+      } catch (e) { toast('Insert failed: ' + e.message, e); }
     };
     menu.append(btn);
   }
@@ -4615,7 +4654,7 @@ function closeInsertMenu() {
 async function openRaw(path) {
   let data;
   try { data = await papi('/file?path=' + encodeURIComponent(path)); }
-  catch (e) { toast('Cannot open raw: ' + e.message, true); return; }
+  catch (e) { toast('Cannot open raw: ' + e.message, e); return; }
 
   const overlay = el('div');
   overlay.id = 'rawoverlay';
@@ -4656,7 +4695,7 @@ async function openRaw(path) {
       applyDoc(res.doc);
       toast('Saved ' + path);
       checkDocument(); // raw edits can touch any block — full re-check
-    } catch (e) { toast('Raw save failed: ' + e.message, true); }
+    } catch (e) { toast('Raw save failed: ' + e.message, e); }
   };
   ta.focus();
 }
@@ -4711,7 +4750,7 @@ async function removeProject(pid) {
     }
     await refreshProjects();
     toast('Project removed');
-  } catch (e) { toast('Remove failed: ' + e.message, true); }
+  } catch (e) { toast('Remove failed: ' + e.message, e); }
 }
 
 /* ------------------------------------------------------------------ */
@@ -4783,7 +4822,7 @@ async function addProjectFile(fullPath) {
     toast('Project added: ' + proj.name);
     return true;
   } catch (e) {
-    toast('Cannot add project: ' + e.message, true);
+    toast('Cannot add project: ' + e.message, e);
     return false;
   }
 }
@@ -4811,7 +4850,7 @@ async function openBrowseModal() {
       }
       await load(data.path);
     } catch (e) {
-      toast('Path not found: ' + p, true);
+      toast('Path not found: ' + p, e);
     }
   };
   pathInput.addEventListener('keydown', e => {
@@ -5380,7 +5419,7 @@ async function toggleBlockStage(b) {
       applyGitHighlights();
       rerenderContentPreservingScroll();
     }).catch(() => {});
-  } catch (e) { toast('Block stage failed: ' + e.message, true); }
+  } catch (e) { toast('Block stage failed: ' + e.message, e); }
 }
 
 // the per-block stage/unstage button (only for blocks with a diff).
@@ -5415,7 +5454,7 @@ async function discardBlockChange(b) {
       toast('Block change discarded');
     }
     await refreshGit();
-  } catch (e) { toast('Discard failed: ' + e.message, true); }
+  } catch (e) { toast('Discard failed: ' + e.message, e); }
 }
 
 // mark git work as in-flight: renderGit disables all controls and shows
@@ -5440,7 +5479,7 @@ async function gitPaths(op, paths) {
     await fetchGitChanges();
     applyGitHighlights();
     applyOutlineGitMarks();
-  } catch (e) { toast(`Git ${op} failed: ` + e.message, true); }
+  } catch (e) { toast(`Git ${op} failed: ` + e.message, e); }
     finally { gitBusyEnd(); }
 }
 
@@ -5461,7 +5500,7 @@ async function gitDiscard(paths) {
     applyOutlineGitMarks();
     refreshDoc(); // the worktree changed underneath us
     toast(paths.length === 1 ? 'Changes discarded' : `Discarded changes in ${paths.length} files`);
-  } catch (e) { toast('Discard failed: ' + e.message, true); }
+  } catch (e) { toast('Discard failed: ' + e.message, e); }
     finally { gitBusyEnd(); }
 }
 
@@ -5493,7 +5532,7 @@ async function gitCommit(ta, andPush = false) {
     // covers both operations without an idle flash between them
     if (andPush) await gitPush(null);
     toast('Committed: ' + res.summary);
-  } catch (e) { toast('Commit failed: ' + e.message, true); }
+  } catch (e) { toast('Commit failed: ' + e.message, e); }
     finally { gitBusyEnd(); }
 }
 
@@ -5518,7 +5557,7 @@ async function gitPush(btn) {
     if (/no upstream/i.test(e.message) && state.git && state.git.branch) {
       msg += ` — run: git push -u origin ${state.git.branch}`;
     }
-    toast(msg, true);
+    toast(msg, e);
   } finally {
     state.pushing = false;
     gitBusyEnd(); // restores the enabled buttons
@@ -5534,7 +5573,7 @@ async function gitInit() {
     applyGitHighlights();
     applyOutlineGitMarks();
     toast('Git repository initialized');
-  } catch (e) { toast('git init failed: ' + e.message, true); }
+  } catch (e) { toast('git init failed: ' + e.message, e); }
     finally { gitBusyEnd(); }
 }
 
@@ -5589,7 +5628,7 @@ async function commitWholeFile(path) {
     modal.classList.add('hidden');
     modal.innerHTML = '';
     if (state.gitShowDiff) toggleDiffOnly();
-  } catch (e) { toast('Commit failed: ' + e.message, true); }
+  } catch (e) { toast('Commit failed: ' + e.message, e); }
     finally { gitBusyEnd(); }
 }
 
@@ -5760,7 +5799,7 @@ function appendLtDecisionBox(panel, cfg) {
       dl.disabled = true;
       try {
         await ppost('/proof/install-lt', {});
-      } catch (e) { toast('Download failed to start: ' + e.message, true); }
+      } catch (e) { toast('Download failed to start: ' + e.message, e); }
       loadProofConfig(); // re-render into the polling state
     };
     box.append(dl);
@@ -5774,7 +5813,7 @@ function appendLtDecisionBox(panel, cfg) {
       state.proof.checked = false;
       renderProof();
       toast('Offline spellchecker enabled');
-    } catch (e) { toast('Switch failed: ' + e.message, true); }
+    } catch (e) { toast('Switch failed: ' + e.message, e); }
   };
   box.append(sw);
   panel.append(box);
@@ -5923,7 +5962,7 @@ async function checkDocument() {
     state.proof.issues = mergeIssues([], res.issues);
     state.proof.checked = true;
   } catch (e) {
-    toast('Check failed: ' + e.message, true);
+    toast('Check failed: ' + e.message, e);
   } finally {
     state.proof.checking = false;
     renderProof();
@@ -5981,7 +6020,7 @@ async function ignoreIssue(issue) {
     rerenderContentPreservingScroll();
     toast('Case ignored for this project — it will not come back on re-checks');
   } catch (e) {
-    toast('Ignore failed: ' + e.message, true);
+    toast('Ignore failed: ' + e.message, e);
   }
 }
 
@@ -5998,7 +6037,7 @@ async function addToDictionary(issue) {
     rerenderContentPreservingScroll();
     toast(`“${word}” added to the project dictionary`);
   } catch (e) {
-    toast('Failed to add word: ' + e.message, true);
+    toast('Failed to add word: ' + e.message, e);
   }
 }
 
@@ -6247,7 +6286,7 @@ async function doUndo() {
     if (res.noop) { toast('Nothing to undo'); return; }
     applyDoc(res.doc);
     toast('Undone: ' + res.label);
-  } catch (e) { toast('Undo failed: ' + e.message, true); }
+  } catch (e) { toast('Undo failed: ' + e.message, e); }
 }
 
 async function doRedo() {
@@ -6259,7 +6298,7 @@ async function doRedo() {
     if (res.noop) { toast('Nothing to redo'); return; }
     applyDoc(res.doc);
     toast('Redone: ' + res.label);
-  } catch (e) { toast('Redo failed: ' + e.message, true); }
+  } catch (e) { toast('Redo failed: ' + e.message, e); }
 }
 
 // Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y — but only outside text fields, where the
@@ -6443,7 +6482,7 @@ function applyDoc(doc, fromDisk = false) {
 async function refreshDoc() {
   if (!state.project) { renderAll(); return; }
   try { applyDoc(await papi('/doc')); }
-  catch (e) { toast('Cannot load document: ' + e.message, true); }
+  catch (e) { toast('Cannot load document: ' + e.message, e); }
   loadGraphics();
 }
 

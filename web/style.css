@@ -361,8 +361,15 @@ table.gedit { width: 100%; table-layout: auto; }
   position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
   background: #222; color: #fff; padding: 9px 18px; border-radius: 20px;
   font-size: 13px; z-index: 70; max-width: 80vw;
+  display: flex; align-items: center; gap: 10px;
 }
 #toast.err { background: #a33025; }
+/* the dismiss button on sticky server-error toasts */
+#toast .toast-x {
+  background: none; border: none; color: inherit; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 0; opacity: .85;
+}
+#toast .toast-x:hover { opacity: 1; }
 
 figure.blkfig { margin: 1em 0; }
 
