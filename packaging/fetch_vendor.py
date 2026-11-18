@@ -111,6 +111,20 @@ def fetch() -> int:
                     manifest[f'{name}/{p.relative_to(dest).as_posix()}'] = _sha256(p)
             n = sum(1 for _ in dest.rglob('*') if _.is_file())
             print(f'  -> web/vendor/{name} ({n} files)')
+            # mathlive-static.css declares the KaTeX font faces with
+            # paths relative to itself (fonts/KaTeX_*.woff2) — serve the
+            # already-vendored KaTeX fonts from that location too
+            if name == 'mathlive':
+                fonts_src = VENDOR / 'katex' / 'fonts'
+                fonts_dst = dest / 'fonts'
+                if fonts_src.is_dir():
+                    shutil.copytree(fonts_src, fonts_dst, dirs_exist_ok=True)
+                for p in sorted(fonts_dst.rglob('*')):
+                    if p.is_file():
+                        manifest[f'mathlive/fonts/{p.relative_to(fonts_dst).as_posix()}'] \
+                            = _sha256(p)
+                nf = sum(1 for _ in fonts_dst.rglob('*') if _.is_file())
+                print(f'  -> web/vendor/mathlive/fonts ({nf} files, from katex)')
     (VENDOR / 'manifest.json').write_text(
         json.dumps(manifest, indent=1, sort_keys=True) + '\n', encoding='utf-8')
     print(f'manifest written ({len(manifest)} files)')

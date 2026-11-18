@@ -125,6 +125,27 @@ const ppost = (path, body) => papi(path, {
 
 const INLINE_ARG_CMDS = ['textbf', 'textit', 'emph', 'underline', 'texttt',
   'text', 'textrm', 'mbox', 'footnote', 'ref', 'eqref', 'label', 'url'];
+
+// common no-argument text symbols → their unicode rendering
+const TEXT_SYMBOLS = {
+  copyright: '©', textcopyright: '©',
+  textregistered: '®', texttrademark: '™',
+  textdegree: '°', texteuro: '€', textpound: '£', textyen: '¥',
+  textcent: '¢', textsection: '§', textparagraph: '¶',
+  textdagger: '†', textdaggerdbl: '‡', textbullet: '•',
+  textendash: '–', textemdash: '—', textellipsis: '…',
+  textquotedblleft: '“', textquotedblright: '”',
+  textquoteleft: '‘', textquoteright: '’',
+  textasciitilde: '~', textasciicircum: '^', textasciigrave: '`',
+  textasteriskcentered: '∗', textbackslash: '\\',
+  textbar: '|', textless: '<', textgreater: '>',
+  textbraceleft: '{', textbraceright: '}',
+  textexclamdown: '¡', textquestiondown: '¿',
+  textordfeminine: 'ª', textordmasculine: 'º',
+  textnumero: '№', textmu: 'µ', textbigstar: '★',
+  checkmark: '✓', dag: '†', ddag: '‡', S: '§', P: '¶',
+  dots: '…', ldots: '…', pound: '£',
+};
 // natbib & friends: rendered as one chip including optional args and keys
 const CITE_CMDS = new Set(['cite', 'citep', 'citet', 'citealp', 'citealt',
   'citeauthor', 'citeyear', 'citeyearpar', 'Citep', 'Citet', 'citeonline']);
@@ -552,7 +573,16 @@ function renderInline(src, marks, git) {
           } else if (cmd === 'label') {
             out += `<span class="chip">label:${esc(g.body)}</span>`;
           } else if (cmd === 'url') {
-            out += `<code>${esc(g.body)}</code>`;
+            // LaTeX \url prints the url verbatim — render it as a
+            // clickable link (mono), opened via the system hand-off in
+            // the desktop shell (global click delegate below)
+            const u = g.body.trim();
+            if (/^https?:\/\//i.test(u)) {
+              out += `<a class="rtlink" href="${esc(u)}" ` +
+                `target="_blank" rel="noopener noreferrer">${esc(u)}</a>`;
+            } else {
+              out += `<code>${esc(u)}</code>`;
+            }
           } else if (cmd === 'textbf') {
             out += `<strong>${renderInline(g.body, shiftMarks(marks, g.bodyStart, g.body.length), shiftGit(git, g.bodyStart, g.body.length))}</strong>`;
           } else if (cmd === 'texttt') {
@@ -567,6 +597,34 @@ function renderInline(src, marks, git) {
         }
       }
       if (cmd === 'item') { i = after; continue; }
+      // \href{url}{text} — the text renders (nested commands allowed),
+      // hyperlinked; \url with a scheme becomes a clickable link
+      if (cmd === 'href') {
+        const u = readGroup(src, after);
+        if (u) {
+          const t = readGroup(src, u.end);
+          if (t) {
+            const url2 = u.body.trim();
+            const inner = renderInline(t.body,
+              shiftMarks(marks, t.bodyStart, t.body.length),
+              shiftGit(git, t.bodyStart, t.body.length));
+            if (/^https?:\/\//i.test(url2)) {
+              out += `<a class="rtlink" href="${esc(url2)}" ` +
+                `target="_blank" rel="noopener noreferrer">${inner}</a>`;
+            } else {
+              out += inner;
+            }
+            i = t.end;
+            continue;
+          }
+        }
+      }
+      // common no-argument symbols: \textcopyright ©, \textdegree ° …
+      if (TEXT_SYMBOLS[cmd]) {
+        out += esc(TEXT_SYMBOLS[cmd]);
+        i = after;
+        continue;
+      }
       if (SPACING_CMDS.has(cmd)) {
         out += (cmd === 'quad' || cmd === 'qquad') ? '&nbsp;&nbsp;'
           : (cmd === 'newline' ? '<br>'
@@ -657,6 +715,12 @@ function renderInline(src, marks, git) {
       i = g ? g.end : n;
     } else if (c === '}') {
       out += esc(c); i++;  // stray closing brace — keep it visible
+    } else if (c === '-' && src[i + 1] === '-') {
+      // LaTeX dashes: --- em, -- en (a lone - stays a hyphen; a 4th
+      // hyphen re-enters this branch and renders as a hyphen, like
+      // LaTeX's left-to-right dash munching)
+      if (src[i + 2] === '-') { out += '—'; i += 3; }
+      else { out += '–'; i += 2; }
     } else if (c === '\n' || c === '~') {
       out += ' '; i++;
     } else if (c === '&') {
@@ -1215,6 +1279,19 @@ function figureParts(src) {
   return {path: ig ? ig[1].trim() : null, caption};
 }
 
+// the \caption{...} group of a block source as a spliceable span —
+// {body, pre, post} so an edited caption body can be stitched back
+// without touching the rest of the figure/table (\label, graphics…).
+// post INCLUDES the group's closing brace (g.end is past it)
+function captionSpan(src) {
+  const cm = /\\caption(?:\[[^\]]*\])?\{/.exec(src);
+  if (!cm) return null;
+  const g = readGroup(src, cm.index + cm[0].length - 1);
+  if (!g) return null;
+  return {body: g.body, pre: src.slice(0, g.bodyStart),
+    post: src.slice(g.end - 1)};
+}
+
 // ---- figure media: resolve \includegraphics paths before fetching ----
 // raster args load directly (single request); extensionless / pdf / eps
 // args resolve via the server first, so the file itself downloads once
@@ -1351,6 +1428,182 @@ function listItems(src) {
   }
   items.push(cur);
   return items.map(x => x.replace(/^[\s{*]+/, '')).filter(x => x.trim().length);
+}
+
+// rebuild a list block's source with new item texts — preserves the env
+// name, options and anything between \begin{env} and the first \item
+function rebuildListSource(src, items) {
+  const bm = /\s*\\begin\{([A-Za-z]+\*?)\}(?:\[[^\]]*\])?/.exec(src);
+  if (!bm) return null;
+  const endIdx = src.lastIndexOf('\\end{');
+  if (endIdx < 0) return null;
+  const pre = src.slice(0, bm[0].length);
+  const post = src.slice(endIdx);
+  return pre + items.map(t => '\\item ' + t.replace(/^\s+/, '')).join('\n')
+    + '\n' + post;
+}
+
+// ---- list quick edit: single click makes the items editable in place
+// (render view, bullets stay); Enter adds a bullet, deleting an empty
+// item's text plus one more backspace removes the bullet; double-click
+// or ✎ upgrades to the full editor
+
+let listQuickRef = null;
+
+function listQuickItems() {
+  return [...listQuickRef.ul.querySelectorAll('li[contenteditable]')]
+    .map(li => li.textContent.replace(/\s+/g, ' ').trim());
+}
+
+function commitListQuick() {
+  const q = listQuickRef;
+  if (!q) return;
+  // collect the texts BEFORE clearing the ref — listQuickItems reads it
+  let items = listQuickItems().filter(t => t.length);
+  if (!items.length) items = [''];
+  listQuickRef = null;
+  const src = rebuildListSource(q.src, items);
+  if (src === null || src === q.src) { rerenderBlock(q.block); return; }
+  ppost(`/block/${q.id}/save`, {source: src}).then(res => {
+    applyDoc(res.doc);
+    toast('List saved');
+    refreshGitSoon();
+  }).catch(e => {
+    handleOpError(e, q.block);
+    rerenderBlock(q.block);
+  });
+}
+
+function cancelListQuick() {
+  const q = listQuickRef;
+  if (!q) return;
+  listQuickRef = null;
+  rerenderBlock(q.block);
+}
+
+function openListQuickEdit(b, ev) {
+  enqueueOp(() => {
+    const b2 = blockById(b.id) || b;
+    if (state.edit) closeEditor();
+    commitDirtyRawFiles();
+    if (state.inlineEdit) commitInlineEdit();
+    if (tableQuickRef) commitTableQuick();
+    if (listQuickRef) commitListQuick();
+    clearBlockSelection();
+    const node = document.querySelector(`.block[data-id="${b2.id}"]`);
+    const ul = node && node.querySelector('ul.rtext, ol.rtext');
+    const env = ul && /\\begin\{(itemize|enumerate|description)\}/
+      .exec(b2.source);
+    if (!ul || !env) return;
+    const items = listItems(b2.source);
+    if (!items.length) return;
+    // the lis become plain-text editors of their item source (the bullet
+    // markers stay rendered); Enter adds, Backspace removes
+    const lis = [...ul.children].filter(n => n.tagName === 'LI');
+    lis.forEach((li, i) => {
+      li.textContent = items[i] !== undefined ? items[i] : '';
+      li.contentEditable = 'true';
+      li.spellcheck = false;
+      li.addEventListener('keydown', e => listQuickKeydown(e, li));
+    });
+    ul.classList.add('list-edit');
+    listQuickRef = {id: b2.id, block: b2, ul, src: b2.source,
+      env: env[1]};
+    // focus the clicked item (caret at the click point)
+    let li = ev && ev.target.closest && ev.target.closest('li');
+    if (!li || !ul.contains(li)) li = lis[0];
+    li.focus();
+    if (ev && document.caretRangeFromPoint) {
+      try {
+        const r = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+        if (r && li.contains(r.startContainer)) {
+          const sel = getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
+        }
+      } catch (e) { /* caret at start */ }
+    }
+    node.querySelector('.bcontent').append(el('div', 'qtabhint',
+      'Enter: new item · Backspace on an empty item removes it · ' +
+      'Esc cancels · Ctrl+Enter saves'));
+  });
+}
+
+function listQuickKeydown(e, li) {
+  const q = listQuickRef;
+  if (!q) return;
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    e.stopPropagation();
+    commitListQuick();
+    return;
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    cancelListQuick();
+    return;
+  }
+  if (e.key === 'Enter') {
+    // new bullet after this one; text after the caret moves into it
+    e.preventDefault();
+    e.stopPropagation();
+    const sel = getSelection();
+    if (!sel.rangeCount) return;
+    const r = sel.getRangeAt(0);
+    const after = r.cloneRange();
+    after.selectNodeContents(li);
+    after.setStart(r.endContainer, r.endOffset);
+    const rest = after.toString();
+    r.deleteContents();          // li keeps the text before the caret
+    const lis = [...q.ul.querySelectorAll('li[contenteditable]')];
+    const idx = lis.indexOf(li);
+    const newLi = document.createElement('li');
+    newLi.contentEditable = 'true';
+    newLi.spellcheck = false;
+    newLi.textContent = rest;
+    newLi.addEventListener('keydown', e => listQuickKeydown(e, newLi));
+    if (idx + 1 < lis.length)
+      lis[idx + 1].before(newLi);
+    else
+      q.ul.append(newLi);
+    newLi.focus();
+    return;
+  }
+  if (e.key === 'Backspace') {
+    const sel = getSelection();
+    const atStart = !sel.rangeCount ||
+      (sel.isCollapsed && sel.getRangeAt(0).startOffset === 0 &&
+       !sel.getRangeAt(0).toString());
+    const lis = [...q.ul.querySelectorAll('li[contenteditable]')];
+    const idx = lis.indexOf(li);
+    if (!atStart) return;      // normal text deletion inside the item
+    if (li.textContent.trim() === '') {
+      // empty item + one more backspace: the bullet goes away
+      e.preventDefault();
+      e.stopPropagation();
+      if (lis.length <= 1) return;   // never empty the whole list here
+      const prev = lis[idx - 1] || lis[idx + 1];
+      li.remove();
+      if (prev) prev.focus();
+    } else if (idx > 0) {
+      // backspace at the start of a non-empty item merges it upward
+      e.preventDefault();
+      e.stopPropagation();
+      const prev = lis[idx - 1];
+      const p = prev.textContent.replace(/\s+$/, '');
+      prev.textContent = p + (p ? ' ' : '') + li.textContent;
+      li.remove();
+      // caret at the join point
+      const sel2 = getSelection();
+      const r = document.createRange();
+      r.selectNodeContents(prev);
+      r.collapse(false);
+      sel2.removeAllRanges();
+      sel2.addRange(r);
+      prev.focus();
+    }
+  }
 }
 
 const EDITABLE = new Set(['paragraph', 'section', 'math', 'list', 'table',
@@ -1829,7 +2082,8 @@ function renderContent() {
         (h || isBlankComment(b) ? ' b-collapsed' : ''));
       // left cell: the block plus a hover add-block bar above it
       const left = el('div', 'sbsl');
-      left.append(insertLine(b, h || isBlankComment(b)), blockEl(b));
+      left.append(insertLine(b, h || isBlankComment(b)), blockEl(b),
+        insertFiller(b, h || isBlankComment(b)));
       // an open inline editor for THIS block moves back into place
       if (inlineKeepNode && state.inlineEdit && state.inlineEdit.id === b.id) {
         const freshBc = left.querySelector('.bcontent');
@@ -1895,6 +2149,31 @@ function insertLine(b, hidden = false) {
   return line;
 }
 
+// side-by-side only: fills the leftover space BELOW a rendered block
+// (the raw column often runs taller) so the whole gap is a click target
+// for adding a block — same semantics as the bar: insert/move after b
+function insertFiller(b, hidden = false) {
+  const fill = el('div', 'sbsfill' + (hidden ? ' b-collapsed' : ''));
+  fill.title = 'Click to add a block here…';
+  fill.append(el('span', 'insertbtn', '+'));
+  // a mousedown that just dismissed an inline editor must not also open
+  // the insert menu on the same click
+  let downHadEditor = false;
+  fill.addEventListener('mousedown', () => {
+    downHadEditor = !!state.inlineEdit;
+  });
+  fill.onclick = ev => {
+    ev.stopPropagation();
+    if (downHadEditor) { downHadEditor = false; return; }
+    if (state.selBlocks.length && !state.selBlocks.includes(b.id)) {
+      moveSelectedBlocks(b.id, false);   // the filler sits BELOW b
+      return;
+    }
+    showInsertMenu(b, ev);
+  };
+  return fill;
+}
+
 /* ------------------------------------------------------------------ */
 /* side-by-side raw column: one grid row per block — the browser aligns */
 /* both cells, so segments can never overlap or drift. Segments are    */
@@ -1925,7 +2204,15 @@ function rawSeg(b, firstOfFile, lastOfFile) {
   if (lastOfFile) seg.dataset.last = '1';
   seg.contentEditable = 'true';
   seg.spellcheck = false;
-  seg.textContent = b.source + sepAfterBlock(b);
+  // raw view: runs of blank lines collapse to ONE blank line — display
+  // only. The real source is kept on the segment: focusing (mousedown)
+  // expands it back, so edits always happen on the actual file text and
+  // saves keep the original blank-line layout intact
+  seg._realSrc = b.source + sepAfterBlock(b);
+  // (\r?\n) captured, run of 2+ of the SAME ending collapsed to one pair
+  seg._dispSrc = seg._realSrc.replace(/(\r?\n)(?:\1){2,}/g, '$1$1');
+  seg._expanded = false;
+  seg.textContent = seg._dispSrc;
   // with a block selection, ctrl+clicking a raw segment moves the whole
   // selection to just after this block (plain clicks keep editing)
   seg.addEventListener('click', ev => {
@@ -1944,7 +2231,11 @@ function segsOfFile(path) {
 }
 
 function rawFileText(path) {
-  return segsOfFile(path).map(s => s.textContent).join('');
+  // collapsed segments display a shortened copy — their REAL text lives
+  // in _realSrc and is what must be saved
+  return segsOfFile(path).map(s =>
+    s._expanded ? s.textContent
+      : (s._realSrc !== undefined ? s._realSrc : s.textContent)).join('');
 }
 
 // the pristine file content as last saved (from the doc model)
@@ -1958,6 +2249,53 @@ function rawFileOriginal(path) {
 
 function wireRawSeg(seg) {
   attachRawAC(seg);
+  // a collapsed segment expands to its REAL source on mousedown — before
+  // the browser places the caret, so edits always happen on the actual
+  // file text. The caret lands on the clicked line (collapsed blank
+  // lines shift the layout, compensated below)
+  seg.addEventListener('mousedown', ev => {
+    if (seg._expanded) return;
+    const dispLines = seg._dispSrc.split('\n');
+    const realLines = seg._realSrc.split('\n');
+    const rect = seg.getBoundingClientRect();
+    const lh = parseFloat(getComputedStyle(seg).lineHeight) || 21;
+    const k = Math.max(0, Math.min(dispLines.length - 1,
+      Math.floor((ev.clientY - rect.top) / lh)));
+    // collapsed runs dropped whole blank lines: count the ones above the
+    // clicked display line to find the matching REAL line
+    let dropped = 0, prevEmpty = false;
+    for (let d = 0; d <= Math.min(k, dispLines.length - 1); d++) {
+      const empty = dispLines[d].trim() === '';
+      if (empty && prevEmpty) dropped++;
+      prevEmpty = empty;
+    }
+    const realLine = Math.min(k + dropped, realLines.length - 1);
+    let off = 0;
+    for (let r = 0; r < realLine; r++) off += realLines[r].length + 1;
+    seg.textContent = seg._realSrc;
+    seg._expanded = true;
+    requestAnimationFrame(() => {
+      const tn = seg.firstChild;
+      if (tn && tn.nodeType === 3) {
+        const sel = getSelection();
+        const rng = document.createRange();
+        rng.setStart(tn, Math.min(off, tn.length));
+        rng.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(rng);
+      }
+    });
+  });
+  seg.addEventListener('blur', () => {
+    // an untouched segment collapses back once focus leaves; a segment
+    // in a dirty file stays expanded until the file is committed or
+    // reverted (its textContent is the real, possibly edited text)
+    if (state.sbsFiles.has(seg.dataset.file)) return;
+    if (seg._realSrc !== undefined) {
+      seg.textContent = seg._dispSrc;
+      seg._expanded = false;
+    }
+  });
   seg.addEventListener('input', () => {
     // start tracking this file's edits (original = last saved content)
     if (!state.sbsFiles.has(seg.dataset.file)) {
@@ -1979,7 +2317,19 @@ function wireRawSeg(seg) {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      cancelRawFile(seg.dataset.file);
+      // a dirty raw buffer is what Escape has always cancelled here.
+      // With the buffer unmodified, an open inline editor on the
+      // rendered side is the actual editing in progress — end that
+      // instead (single-click editing keeps it open much more often)
+      if (state.sbsFiles.has(seg.dataset.file) &&
+          rawFileText(seg.dataset.file) !==
+          state.sbsFiles.get(seg.dataset.file).original) {
+        cancelRawFile(seg.dataset.file);
+      } else if (state.inlineEdit) {
+        cancelInlineEdit();
+      } else {
+        cancelRawFile(seg.dataset.file);
+      }
     } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       e.stopPropagation();
@@ -2372,13 +2722,146 @@ function openInlineEdit(b, ev, sourceOverride, caretOff) {
   });
 }
 
-function reallyOpenInlineEdit(b, ev, sourceOverride, caretOff) {
+// caption of a figure/table: edit the caption text in place (render
+// view) — the image and the rest of the block stay untouched
+function openCaptionEdit(b, ev, capEl) {
+  enqueueOp(() => {
+    const b2 = blockById(b.id) || b;
+    const span = captionSpan(b2.source);
+    if (!span) return;
+    reallyOpenInlineEdit(b2, ev, span.body, null,
+      {el: capEl, pre: span.pre, post: span.post});
+  });
+}
+
+// splice span for the TITLE of a sectioning command
+// (\section[short]{Title} etc.) — like captionSpan for headings
+function titleSpan(src) {
+  const m = /^(\\(?:chapter|section|subsection|subsubsection|paragraph)\*?(?:\[[^\]]*\])?)\{/.exec(src);
+  if (!m) return null;
+  const g = readGroup(src, m.index + m[0].length - 1);
+  if (!g) return null;
+  return {body: g.body, pre: src.slice(0, g.bodyStart),
+    post: src.slice(g.end - 1)};
+}
+
+// heading title: edit the title text in place (render view) on a single
+// click; double-click or the ✎ button opens the full block editor
+function openTitleEdit(b, ev) {
+  enqueueOp(() => {
+    const b2 = blockById(b.id) || b;
+    const span = titleSpan(b2.source);
+    if (!span) return;
+    const node = document.querySelector(`.block[data-id="${b2.id}"]`);
+    const hEl = node && node.querySelector('.bcontent h1, .bcontent h2, ' +
+      '.bcontent h3, .bcontent h4, .bcontent h5');
+    if (!hEl) return;
+    reallyOpenInlineEdit(b2, ev, span.body, null,
+      {el: hEl, pre: span.pre, post: span.post, title: true});
+  });
+}
+
+// ---- table quick edit: single click makes the cell values editable in
+// place (render view); double-click or ✎ upgrades to the full editor
+
+let tableQuickRef = null;
+
+function commitTableQuick() {
+  const q = tableQuickRef;
+  if (!q) return;
+  tableQuickRef = null;
+  const src = serializeTableRich(q.model);
+  if (src === q.original) { rerenderBlock(q.block); return; }
+  ppost(`/block/${q.id}/save`, {source: src}).then(res => {
+    applyDoc(res.doc);
+    toast('Table saved');
+    refreshGitSoon();
+  }).catch(e => {
+    handleOpError(e, q.block);
+    rerenderBlock(q.block);
+  });
+}
+
+function cancelTableQuick() {
+  const q = tableQuickRef;
+  if (!q) return;
+  tableQuickRef = null;
+  rerenderBlock(q.block);
+}
+
+function openTableQuickEdit(b, ev) {
+  enqueueOp(() => {
+    const b2 = blockById(b.id) || b;
+    if (state.edit) closeEditor();
+    commitDirtyRawFiles();
+    if (state.inlineEdit) commitInlineEdit();
+    if (tableQuickRef) commitTableQuick();
+    if (listQuickRef) commitListQuick();
+    clearBlockSelection();
+    const model = parseTableRich(b2.source);
+    if (!model) return;
+    const node = document.querySelector(`.block[data-id="${b2.id}"]`);
+    const tabEl = node && node.querySelector('.rtab, .envcard');
+    if (!tabEl) return;
+    const root = el('div', 'qtab');
+    const tbl = el('table', 'rtab qtab-grid');
+    const inputs = [];
+    model.rows.forEach(row => {
+      const tr = el('tr');
+      row.cells.forEach(cell => {
+        const td = el('td');
+        if (cell.mc && cell.mc.n > 1) td.colSpan = cell.mc.n;
+        const ta = el('textarea');
+        ta.value = cell.text;
+        ta.rows = 1;
+        ta._cell = cell;
+        ta.addEventListener('input', () => {
+          cell.text = ta.value;
+          ta.style.height = 'auto';
+          ta.style.height = ta.scrollHeight + 'px';
+        });
+        ta.addEventListener('keydown', e => {
+          if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault();
+            commitTableQuick();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            cancelTableQuick();
+          }
+        });
+        inputs.push(ta);
+        td.append(ta);
+        tr.append(td);
+      });
+      tbl.append(tr);
+    });
+    root.append(tbl);
+    root.append(el('div', 'qtabhint',
+      'Esc cancels · Ctrl+Enter saves · double-click opens the full editor'));
+    tabEl.replaceWith(root);
+    tableQuickRef = {id: b2.id, block: b2, model, root,
+      original: serializeTableRich(model)};
+    requestAnimationFrame(() => inputs.forEach(t => {
+      t.style.height = 'auto';
+      t.style.height = t.scrollHeight + 'px';
+    }));
+    if (ev) inputs[0]?.focus();
+  });
+}
+
+function reallyOpenInlineEdit(b, ev, sourceOverride, caretOff, capEdit) {
+  if (tableQuickRef) commitTableQuick();
+  if (listQuickRef) commitListQuick();
   if (state.edit) closeEditor();
   commitDirtyRawFiles();
   if (state.inlineEdit) commitInlineEdit();
   clearBlockSelection();
   const node = $(`.block[data-id="${b.id}"]`);
-  const bc = node && node.querySelector('.bcontent');
+  // caption edit: only the figcaption element becomes the editor — the
+  // image and the rest of the figure stay visible
+  const bc = capEdit ? capEdit.el
+    : (node && node.querySelector('.bcontent'));
   if (!bc) return;
   // the clicked text offset inside the rendered content maps 1:1 onto
   // the editor's text (same rendering, same characters)
@@ -2395,9 +2878,19 @@ function reallyOpenInlineEdit(b, ev, sourceOverride, caretOff) {
   const ec = el('div', 'inline-ce');
   ec.contentEditable = 'true';
   ec.spellcheck = false;
+  if (capEdit) {
+    // keep the replaced element's text formatting — the generic inline
+    // editor styles would turn a centered .88em caption or a bold
+    // heading into plain body text
+    const cs = getComputedStyle(capEdit.el);
+    for (const prop of ['fontSize', 'fontWeight', 'fontStyle',
+        'textAlign', 'color', 'marginBottom'])
+      ec.style[prop] = cs[prop];
+  }
   state.inlineEdit = {id: b.id, block: b, ec,
                       source: sourceOverride !== undefined ? sourceOverride : b.source,
-                      original: b.source, active: null, lastOff: null};
+                      original: capEdit ? sourceOverride : b.source,
+                      capEdit: capEdit || null, active: null, lastOff: null};
   ceRender(state.inlineEdit);
   bc.replaceWith(ec);
   if (textOff !== null) {
@@ -2573,6 +3066,27 @@ function commitInlineEdit() {
     state.inlineEdit = null;
     closeOrphanAutocomplete();
     const src = reflowLongLines(ref.source);
+    if (ref.capEdit) {
+      // caption-only edit: splice the caption body back into the block
+      // source — \label, graphics and the rest stay untouched
+      if (src === ref.original) {
+        rerenderBlock(ref.block);
+        flushPendingDiffRerender();
+        return;
+      }
+      try {
+        const res = await ppost(`/block/${ref.id}/save`,
+          {source: ref.capEdit.pre + src + ref.capEdit.post});
+        applyDoc(res.doc);
+        toast('Caption saved');
+        checkBlocks([ref.id]);
+        refreshGitSoon();
+      } catch (e) {
+        handleOpError(e, ref.block);
+        rerenderBlock(ref.block);
+      }
+      return;
+    }
     if (src === ref.original) {
       rerenderBlock(ref.block);
       flushPendingDiffRerender();
@@ -3031,43 +3545,119 @@ function blockEl(b, hidden = false) {
     // double-click edits; in side-by-side mode rendered prose blocks also
     // edit on a SINGLE plain click — but a drag (text marking) must still
     // select the rendered text, so the pointer must not have moved between
-    // press and release. Modifiers keep their other meanings (shift
-    // extends the browser selection, ctrl/cmd stay reserved)
-    let sbsDownXY = null;
+    // press and release. Tables open their quick cell editor on a single
+    // click, section headings their title; both modes. Modifiers keep
+    // their other meanings (shift extends the browser selection,
+    // ctrl/cmd stay reserved)
+    let downXY = null;
     node.addEventListener('mousedown', ev => {
-      sbsDownXY = (state.sbs && ev.button === 0 &&
-        (b.type === 'paragraph' || b.type === 'comment'))
+      downXY = (ev.button === 0 &&
+        (b.type === 'paragraph' || b.type === 'comment' ||
+         b.type === 'table' || b.type === 'section' || b.type === 'list'))
         ? [ev.clientX, ev.clientY] : null;
     });
     node.addEventListener('click', ev => {
+      // a click on a figure/table caption edits the CAPTION in render
+      // view — works in sbs and single-column, before the prose gate
+      const cap = ev.target.closest('.figcap');
+      if (cap && (b.type === 'figure' || b.type === 'table') &&
+          !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        if (ev.target.closest('.editor') || ev.target.closest('.inline-ce') ||
+            ev.target.closest('.btools') || ev.target.closest('a')) return;
+        ev.preventDefault();
+        openCaptionEdit(b, ev, cap);
+        return;
+      }
+      // single press on a table: quick in-place cell editing
+      if (b.type === 'table' && !ev.ctrlKey && !ev.metaKey &&
+          !ev.shiftKey && !ev.altKey) {
+        if (ev.target.closest('.editor') || ev.target.closest('.qtab') ||
+            ev.target.closest('.btools') || ev.target.closest('.grip') ||
+            ev.target.closest('a') || ev.target.closest('.figcap')) return;
+        if (!downXY || Math.hypot(ev.clientX - downXY[0],
+                                  ev.clientY - downXY[1]) > 4) return;
+        downXY = null;
+        ev.preventDefault();
+        openTableQuickEdit(b, ev);
+        return;
+      }
+      // single press on a list: items editable in place while rendered
+      if (b.type === 'list' && !ev.ctrlKey && !ev.metaKey &&
+          !ev.shiftKey && !ev.altKey) {
+        if (ev.target.closest('.editor') || ev.target.closest('.qtab') ||
+            ev.target.closest('.btools') || ev.target.closest('.grip') ||
+            ev.target.closest('a') || ev.target.closest('.figcap')) return;
+        if (listQuickRef && listQuickRef.id === b.id) return; // caret moves
+        if (!downXY || Math.hypot(ev.clientX - downXY[0],
+                                  ev.clientY - downXY[1]) > 4) return;
+        downXY = null;
+        ev.preventDefault();
+        openListQuickEdit(b, ev);
+        return;
+      }
+      // single press on a heading: quick in-place title editing
+      if (b.type === 'section' && !ev.ctrlKey && !ev.metaKey &&
+          !ev.shiftKey && !ev.altKey) {
+        if (ev.target.closest('.editor') || ev.target.closest('.inline-ce') ||
+            ev.target.closest('.collapsebtn') || ev.target.closest('.btools') ||
+            ev.target.closest('.grip') || ev.target.closest('a') ||
+            ev.target.closest('.figcap')) return;
+        if (!downXY || Math.hypot(ev.clientX - downXY[0],
+                                  ev.clientY - downXY[1]) > 4) return;
+        downXY = null;
+        ev.preventDefault();
+        openTitleEdit(b, ev);
+        return;
+      }
       if (!state.sbs || (b.type !== 'paragraph' && b.type !== 'comment') ||
           ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey) return;
       if (ev.target.closest('.editor') || ev.target.closest('.inline-ce') ||
           ev.target.closest('.btools') || ev.target.closest('.grip') ||
           ev.target.closest('a') || ev.target.closest('.stage-block-wrap') ||
           ev.target.closest('.refchip')) return;
-      if (!sbsDownXY) return;   // the drag started outside this block
-      if (Math.hypot(ev.clientX - sbsDownXY[0],
-                     ev.clientY - sbsDownXY[1]) > 4) return;
-      sbsDownXY = null;
+      if (!downXY) return;      // the drag started outside this block
+      if (Math.hypot(ev.clientX - downXY[0],
+                     ev.clientY - downXY[1]) > 4) return;
+      downXY = null;
       ev.preventDefault();
       openInlineEdit(b, ev);
     });
     node.addEventListener('dblclick', ev => {
+      // single-click editing is active here: a double click UPGRADES to
+      // the full editor (quick table cells / heading title first commit)
+      if (tableQuickRef && tableQuickRef.id === b.id) {
+        commitTableQuick();
+        openEditor(b);
+        return;
+      }
+      if (state.inlineEdit && state.inlineEdit.capEdit &&
+          state.inlineEdit.capEdit.title && state.inlineEdit.id === b.id) {
+        commitInlineEdit();
+        openEditor(b);
+        return;
+      }
+      if (listQuickRef && listQuickRef.id === b.id) {
+        commitListQuick();
+        openEditor(b);
+        return;
+      }
       if (ev.target.closest('.editor') || ev.target.closest('.inline-ce') ||
           ev.target.closest('.btools') ||
           ev.target.closest('.grip') || ev.target.closest('a')) return;
+      // caption edit (non-sbs: the sbs click handler already covers it)
+      const cap = ev.target.closest('.figcap');
+      if (cap && (b.type === 'figure' || b.type === 'table')) {
+        ev.preventDefault();
+        openCaptionEdit(b, ev, cap);
+        return;
+      }
       if (b.type === 'paragraph' || b.type === 'comment') {
         // sbs: the single click above already opened the editor — the
         // second click lands inside the inline editor and hits the
         // guard above; this path stays for non-sbs mode
         if (state.sbs) return;
-        window.__dlog = (window.__dlog || []);
-        window.__dlog.push('sbs-open ' + b.id);
         openInlineEdit(b, ev);
-        window.__dlog.push('opened=' + !!document.querySelector('.inline-ce'));
       } else {
-        window.__dlog.push('openEditor ' + b.id);
         openEditor(b);
       }
     });
@@ -3304,6 +3894,8 @@ function openEditor(b, freshOpts) {
 }
 
 function reallyOpenEditor(b, freshOpts) {
+  if (tableQuickRef) commitTableQuick(); // one active editor at a time
+  if (listQuickRef) commitListQuick();
   if (state.inlineEdit) commitInlineEdit(); // one active editor at a time
   commitDirtyRawFiles();
   clearBlockSelection();
@@ -6638,6 +7230,15 @@ connectWS();
 // and compiled PDFs are handed to the system instead
 api('/api/env').then(env => { state.desktop = !!env.desktop; })
   .catch(() => {});
+// rendered \url / \href links: in the desktop shell the system browser
+// opens them (the window must not navigate); in the browser they are
+// plain target=_blank anchors and need nothing
+document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('a.rtlink');
+  if (!a || !state.desktop) return;
+  e.preventDefault();
+  post('/open-url', {url: a.getAttribute('href')}).catch(() => {});
+});
 
 (async () => {
   try {
@@ -6756,6 +7357,10 @@ api('/api/env').then(env => { state.desktop = !!env.desktop; })
   // clicking outside the edited block / a raw file editor commits it —
   // independent of blur, which is not delivered reliably in every embedding
   document.addEventListener('mousedown', e => {
+    const q = tableQuickRef;
+    if (q && !e.target.closest('.qtab')) commitTableQuick();
+    const lq = listQuickRef;
+    if (lq && !e.target.closest('.list-edit')) commitListQuick();
     const ref = state.inlineEdit;
     if (ref) {
       if (e.target.closest('.acpopup')) return;
@@ -6783,16 +7388,40 @@ api('/api/env').then(env => { state.desktop = !!env.desktop; })
   document.addEventListener('mousedown', e => {
     if (!state.selBlocks.length) return;
     if (e.target.closest('.block') || e.target.closest('#sidebar') ||
-        e.target.closest('.insertline') || e.target.closest('.editor') ||
+        e.target.closest('.insertline') || e.target.closest('.sbsfill') ||
+        e.target.closest('.editor') ||
         e.target.closest('.inline-ce') || e.target.closest('.acpopup') ||
         e.target.closest('header') ||
         e.target.closest('button') || e.target.closest('select')) return;
     clearBlockSelection();
   });
   document.addEventListener('keydown', e => {
-    if (e.key !== 'Escape' || !state.selBlocks.length) return;
-    if (state.inlineEdit || state.edit ||
-        document.querySelector('.acpopup')) return;
+    if (e.key !== 'Escape') return;
+    // the quick table editor cancels first (no popup interplay)
+    if (tableQuickRef) {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelTableQuick();
+      return;
+    }
+    if (listQuickRef) {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelListQuick();
+      return;
+    }
+    // the inline editor's own Escape handler runs on the editor element —
+    // when focus sat anywhere else (user clicked away, never entered it)
+    // this is the only path that still ends the editing. The classic
+    // editor keeps its own handler; the autocomplete popup owns the key
+    if (state.inlineEdit && !state.edit &&
+        !document.querySelector('.acpopup')) {
+      e.preventDefault();
+      cancelInlineEdit();
+      return;
+    }
+    if (!state.selBlocks.length) return;
+    if (state.edit || document.querySelector('.acpopup')) return;
     clearBlockSelection();
   });
   // raster figures whose literal path 404s (file moved, graphicspath use)

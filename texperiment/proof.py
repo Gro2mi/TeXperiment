@@ -118,6 +118,17 @@ def mask_prose(text):
                     continue
                 m = CMD_RE.match(masked, i, hi)
                 if not m:
+                    if i + 1 < hi and masked[i + 1] in ',;:':
+                        # spacing commands (\, \; \:) — formatting, not
+                        # text; keeping the punctuation leaked "(m,s)"
+                        # into checks
+                        blank(i, i + 2)
+                        i += 2
+                        continue
+                    if i + 1 < hi and masked[i + 1] == '!':
+                        blank(i, i + 2)  # \! negative space — invisible
+                        i += 2
+                        continue
                     blank(i, i + 1)  # escaped char like \% \& — keep the char
                     i += 2
                     continue
@@ -129,7 +140,9 @@ def mask_prose(text):
                     scan(g[0], g[1])     # nested commands inside the argument
                     i = g[2]
                     continue
-                # everything else: blank the command, swallow its [..]{..} args
+                # everything else: blank the command, swallow its [..](..){..}
+                # args — \cmidrule(lr){2-5} must not leak "(lr)" into the
+                # compact text for the engines to flag
                 blank(i, m.end())
                 i = m.end()
                 while i < hi:
@@ -140,6 +153,14 @@ def mask_prose(text):
                         if e:
                             blank(i, e)
                             i = e
+                            continue
+                        break
+                    if i < hi and masked[i] == '(':
+                        # trim specs like \cmidrule(lr){2-3}
+                        e = masked.find(')', i)
+                        if e > 0:
+                            blank(i, e + 1)
+                            i = e + 1
                             continue
                         break
                     if i < hi and masked[i] == '{':

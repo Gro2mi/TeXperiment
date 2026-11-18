@@ -207,6 +207,13 @@ h3.blk { font-size: 1.22em; } h4.blk { font-size: 1.05em; }
 }
 sup.fn { font-size: .72em; color: var(--muted); padding: 0 2px; }
 sup.fn::before { content: "("; } sup.fn::after { content: ")"; }
+/* \url / \href links in rendered text: mono like the surrounding chips,
+   accent-colored so they read as links */
+a.rtlink {
+  font-family: var(--mono); font-size: .82em;
+  color: var(--accent); text-decoration: none; word-break: break-all;
+}
+a.rtlink:hover { text-decoration: underline; }
 
 .disp-math { margin: .8em 0; text-align: center; overflow-x: auto; }
 .mathlabels { margin-top: 2px; font-size: .7em; }
@@ -222,8 +229,7 @@ sup.fn::before { content: "("; } sup.fn::after { content: ")"; }
    hint) is never part of the compiled document — half strength, like the
    grid editor's gutter; hover restores full strength (chips are
    clickable jumps) */
-.tabwrap .mathlabels, .tabwrap .editnote,
-.blkfig .mathlabels { opacity: .5; }
+.tabwrap .editnote { opacity: .5; }
 .tabwrap .mathlabels .refchip:hover,
 .blkfig .mathlabels .refchip:hover { opacity: 1; }
 
@@ -233,7 +239,7 @@ table.rtab { border-collapse: collapse; margin: 1em auto; }
 table.rtab td, table.rtab th { border: 1px solid var(--panel-line); padding: 4px 12px; font-size: .92em; }
 
 .figimg { max-width: 80%; display: block; margin: .8em auto .2em; border: 1px solid var(--line); }
-.figcap { text-align: center; font-size: .88em; color: var(--muted); margin-bottom: .8em; }
+.figcap { text-align: center; font-size: .88em; color: var(--panel-ink); margin-bottom: .8em; }
 
 /* toolbar */
 .btools {
@@ -1037,7 +1043,12 @@ tr.rulegap td:hover .ruleadd { display: inline; }
   font-size: 9.5px; letter-spacing: .08em; color: var(--muted);
   pointer-events: none;
 }
-.sbsfileseg:focus { background: var(--panel); }
+/* editing directly in the raw column gets the same green tint + border
+   as the rendered side's inline editor (var(--edit-bg)/--edit-border) */
+.sbsfileseg:focus {
+  background: var(--edit-bg);
+  outline: 2px solid var(--edit-border);
+}
 .sbsfileseg:focus[data-first='1']::before { color: var(--accent); }
 .figpdf {
   width: 100%; height: 340px; background: #fff;
@@ -1070,24 +1081,74 @@ tr.rulegap td:hover .ruleadd { display: inline; }
   font-family: var(--serif); font-size: var(--doc-size, 17px);
   line-height: 1.65; color: var(--panel-ink); background: transparent;
   border: none; outline: none; padding: 0; margin: 0;
-  caret-color: var(--accent); white-space: pre-wrap;
+  caret-color: var(--accent);
+  /* the SOURCE's hard newlines are just spaces to LaTeX: collapse them
+     visually like the rendered side does (pre-wrap made clicking into a
+     wrapped paragraph suddenly show extra raw lines). The DOM text keeps
+     the real characters, so saving preserves the original wrapping */
+  white-space: normal;
 }
 .inline-ce .tok-atomic { border-radius: 3px; }
 .inline-ce .tok-raw {
   background: rgba(59, 130, 246, .1);
   border-radius: 3px; box-shadow: 0 0 0 1px rgba(59, 130, 246, .25);
 }
+/* table quick edit: single click makes cell values editable in place;
+   double-click or the ✎ button upgrades to the full grid editor */
+.qtab { margin: 1em 0; }
+.qtab .rtab { margin: 0; width: 100%; }
+.qtab td { vertical-align: top; }
+.qtab td textarea {
+  border: none; background: transparent; color: var(--panel-ink);
+  font-family: var(--serif); font-size: .92em; line-height: 1.5;
+  width: 100%; min-width: 0; display: block; resize: none;
+  overflow: hidden; padding: 4px 8px; box-sizing: border-box;
+  min-height: 26px; caret-color: var(--accent);
+}
+.qtab td textarea:focus { outline: 1px solid var(--accent); }
+.qtabhint {
+  margin-top: 4px; font-size: .72em; color: var(--muted);
+  font-family: -apple-system, "Segoe UI", sans-serif; text-align: center;
+}
+/* list quick edit: bullets stay rendered, item text becomes editable */
+ul.rtext.list-edit, ol.rtext.list-edit { padding-left: 1.4em; }
+.list-edit li[contenteditable] {
+  outline: none; caret-color: var(--accent);
+  border-bottom: 1px dashed color-mix(in srgb, var(--panel-line) 55%, transparent);
+}
+.list-edit li[contenteditable]:focus {
+  background: color-mix(in srgb, var(--edit-bg) 45%, transparent);
+}
 /* \paragraph / \subparagraph run-in headings: LaTeX puts vertical space
    before them — break onto their own line, then run the text in */
 .runin { display: block; margin-top: .9em; }
 .inline-ce .runin, .tok-atomic .runin { display: inline-block; width: 100%; }
-/* side-by-side left cell: block + hover add-block bar above it */
-.sbsl { position: relative; min-width: 0; }
+/* side-by-side left cell: block + hover add-block bar above it. The cell
+   stretches to the row height (the raw column often runs taller); the
+   .sbsfill filler takes the leftover space below the rendered block and
+   is itself a click target for adding a block there */
+.sbsl {
+  position: relative; min-width: 0;
+  display: flex; flex-direction: column; align-self: stretch;
+}
 .sbsl .insertline {
   position: absolute; top: -9px; left: 0; right: 0; z-index: 5;
   margin: 0; height: 16px; opacity: 0; pointer-events: none;
+  flex: none;
 }
 .sbsl:hover .insertline { opacity: 1; pointer-events: auto; }
+.sbsfill {
+  flex: 1 1 auto; min-height: 0; cursor: pointer; position: relative;
+  border-top: 1px dashed transparent;
+}
+.sbsfill .insertbtn { opacity: 0; transition: opacity .12s; }
+.sbsl:hover .sbsfill {
+  border-top-color: color-mix(in srgb, var(--panel-line) 55%, transparent);
+}
+.sbsfill:hover {
+  background: color-mix(in srgb, var(--toggled-bg) 35%, transparent);
+}
+.sbsfill:hover .insertbtn { opacity: 1; color: var(--accent); }
 /* git busy: spinner floats over the whole Source Control section — the
    panel keeps its size and stays (dimmed) visible underneath */
 #gitSection { position: relative; }
