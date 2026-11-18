@@ -77,6 +77,16 @@ Requirements: Python 3.12+, git.
 ```bash
 powershell -File packaging/build.ps1   # Windows: dist\TeXperiment\ + installer exe
 bash packaging/build.sh                # Linux: dist/texperiment-<ver>-linux.tar.gz
+
+# fast distribution testing — skip installer/zip/tarball, keep the unpacked app:
+powershell -File packaging/build.ps1 -Unpacked   # -> dist\TeXperiment-<ver>\TeXperiment.exe
+bash packaging/build.sh --unpacked               # -> dist/TeXperiment-<ver>/TeXperiment
+
+# incremental: reuse the cached third-party payload, overlay only app code
+# (texperiment/, web/, tectonic/) — seconds instead of minutes; a full
+# build runs automatically when dependencies or the spec change
+powershell -File packaging/build.ps1 -Incremental
+bash packaging/build.sh --incremental
 ```
 
 The scripts install build-time deps (pyinstaller, pywebview, Inno Setup on

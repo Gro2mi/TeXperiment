@@ -1,7 +1,10 @@
 # PyInstaller spec: one-dir build of the TeXperiment desktop app.
 # Built by packaging/build.ps1 (Windows) / packaging/build.sh (Linux) and CI.
-# datas: the served web/ tree (incl. vendored KaTeX/MathLive) and the
-# bundled tectonic fallback binary (fetched by packaging/fetch_tectonic.py).
+# datas: the served web/ tree (incl. vendored KaTeX/MathLive), the bundled
+# tectonic fallback binary, and the app package itself as plain source —
+# run_desktop.py shadows the PYZ copy with the source copy, which is what
+# lets incremental builds overlay app-code edits onto a cached
+# third-party payload without re-running PyInstaller.
 import sys
 from PyInstaller.utils.hooks import collect_submodules
 
@@ -18,6 +21,7 @@ else:
 datas = [
     ('web', 'web'),
     ('packaging/tectonic', 'tectonic'),
+    ('texperiment', 'texperiment'),
 ]
 
 a = Analysis(
