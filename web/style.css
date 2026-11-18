@@ -368,14 +368,22 @@ table.gedit { width: 100%; table-layout: auto; }
   background: #222; color: #fff; padding: 9px 18px; border-radius: 20px;
   font-size: 13px; z-index: 70; max-width: 80vw;
   display: flex; align-items: center; gap: 10px;
+  user-select: text;             /* the message text is selectable */
+  cursor: text;
 }
 #toast.err { background: #a33025; }
-/* the dismiss button on sticky server-error toasts */
-#toast .toast-x {
+/* action buttons on sticky server-error toasts (copy + dismiss) — a
+   fixed-width group so the text wraps around them, and clicks on the
+   buttons never fight the text selection */
+#toast .toast-actions {
+  display: flex; gap: 8px; margin-left: auto; flex-shrink: 0;
+  user-select: none; cursor: default;
+}
+#toast .toast-copy, #toast .toast-x {
   background: none; border: none; color: inherit; cursor: pointer;
   font-size: 14px; line-height: 1; padding: 0; opacity: .85;
 }
-#toast .toast-x:hover { opacity: 1; }
+#toast .toast-copy:hover, #toast .toast-x:hover { opacity: 1; }
 
 figure.blkfig { margin: 1em 0; }
 

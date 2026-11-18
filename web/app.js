@@ -68,13 +68,27 @@ function toast(msg, isErr = false) {
   // an error relayed from the server (callers pass the caught Error
   // object) never auto-hides: server messages can be long (a 503 lock
   // hint, a git failure) and vanish too fast to read — they stay until
-  // the ✕ is clicked. Client-side hints (plain `true`) keep the fade.
+  // the ✕ is clicked, and carry a copy button: long reportable text
+  // (compile failures, git errors) gets pasted into an issue or search.
+  // The message text itself stays selectable
+  const actions = el('span', 'toast-actions');
   if (isErr && typeof isErr === 'object') {
+    const copy = el('button', 'toast-copy', '⧉');
+    copy.title = 'Copy the message to the clipboard';
+    copy.setAttribute('aria-label', 'Copy error message');
+    copy.onclick = () => {
+      navigator.clipboard.writeText(msg).then(() => {
+        copy.textContent = '✓';
+        setTimeout(() => { copy.textContent = '⧉'; }, 1500);
+      }).catch(() => {});
+    };
+    actions.append(copy);
     const x = el('button', 'toast-x', '✕');
     x.title = 'Dismiss';
     x.setAttribute('aria-label', 'Dismiss error');
     x.onclick = () => t.classList.add('hidden');
-    t.append(x);
+    actions.append(x);
+    t.append(actions);
   } else {
     toast._h = setTimeout(() => t.classList.add('hidden'), 3500);
   }

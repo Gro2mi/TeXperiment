@@ -1123,3 +1123,38 @@ test('the git panel survives an unchanged refresh without rebuilding',
     expect(marker, 'panel nodes survive an unchanged refresh')
       .toBe('keep-me');
   });
+
+
+test('an error toast carries a copy button and selectable text',
+  async ({page}) => {
+    await stubProof(page);
+    await page.goto(srv.baseUrl);
+    await settleForEditing(page);
+    // raise a sticky server-error toast through the app's own API
+    await page.evaluate(() => {
+      window.toast('Check failed: something reportable went wrong here.',
+        new Error('reportable'));
+    });
+    const toastEl = page.locator('#toast');
+    await expect(toastEl).toBeVisible();
+    await expect(toastEl).toContainText(
+      'something reportable went wrong here');
+    // the copy button exists; grant the clipboard permissions headless
+    // chromium needs, then click and verify the clipboard content
+    await page.context().grantPermissions(['clipboard-write', 'clipboard-read']);
+    const copy = toastEl.locator('.toast-copy');
+    await expect(copy).toBeVisible();
+    await copy.click();
+    await expect(copy).toHaveText('✓');
+    expect(await page.evaluate(() => navigator.clipboard.readText()))
+      .toContain('something reportable went wrong');
+    // the message text is selectable (user-select: text on the toast)
+    const selectable = await toastEl.evaluate(el => {
+      const cs = getComputedStyle(el);
+      return cs.userSelect === 'text';
+    });
+    expect(selectable).toBe(true);
+    // the dismiss button still hides it
+    await toastEl.locator('.toast-x').click();
+    await expect(toastEl).toBeHidden();
+  });
