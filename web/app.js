@@ -1559,17 +1559,21 @@ function listQuickKeydown(e, li) {
     return;
   }
   if (e.key === 'Enter') {
-    // new bullet after this one; text after the caret moves into it
+    // new bullet after this one; text after the caret moves into it and
+    // the item keeps only what is LEFT of the caret. The selection range
+    // is collapsed for a bare caret — deleting THAT removes nothing, so
+    // an explicit caret→end range does the split
     e.preventDefault();
     e.stopPropagation();
     const sel = getSelection();
     if (!sel.rangeCount) return;
     const r = sel.getRangeAt(0);
-    const after = r.cloneRange();
-    after.selectNodeContents(li);
-    after.setStart(r.endContainer, r.endOffset);
-    const rest = after.toString();
-    r.deleteContents();          // li keeps the text before the caret
+    if (!li.contains(r.endContainer) && r.endContainer !== li) return;
+    const restRange = document.createRange();
+    restRange.selectNodeContents(li);
+    restRange.setStart(r.endContainer, r.endOffset);
+    const rest = restRange.toString();
+    restRange.deleteContents();   // li now ends at the caret
     const lis = [...q.ul.querySelectorAll('li[contenteditable]')];
     const idx = lis.indexOf(li);
     const newLi = document.createElement('li');

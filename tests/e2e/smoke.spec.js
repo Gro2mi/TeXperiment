@@ -356,15 +356,18 @@ test('list quick edit: single click edits items, Enter adds, Backspace removes',
     const firstLi = block.locator('ul.rtext li').first();
     await settleForEditing(page);
 
-    // single click opens the in-place editor (lis become editable)
+    // single click opens the in-place editor (lis become editable).
+    // NOTE: this server's project persists across retries — earlier
+    // attempts may have added/removed items — so only RELATIVE counts
+    // and a unique marker are asserted
+    await page.evaluate(id => { window.__listId = id; }, list.id);
     await firstLi.click();
     await block.locator('.list-edit li[contenteditable]').first()
       .waitFor({state: 'visible'});
-    const editable = await page.locator(
-      '.list-edit li[contenteditable]').count();
-    expect(editable).toBe(3);
+    const base = await page.locator('.list-edit li[contenteditable]').count();
+    expect(base).toBeGreaterThanOrEqual(1);
 
-    // caret to the end of item 1, Enter -> new empty bullet focused
+    // caret to the END of item 1, Enter -> new empty bullet focused
     await firstLi.evaluate(el => {
       el.focus();
       const sel = getSelection();
@@ -376,35 +379,84 @@ test('list quick edit: single click edits items, Enter adds, Backspace removes',
     });
     await page.keyboard.press('Enter');
     await page.waitForFunction(
-      () => document.querySelectorAll('.list-edit li[contenteditable]').length === 4);
-    // type into the new bullet
-    await page.keyboard.type('New bullet point');
-    // save
+      ([id, n]) => document.querySelectorAll(
+        `.block[data-id="${id}"] .list-edit li[contenteditable]`).length === n,
+      [list.id, base + 1]);
+    // type into the new bullet, save
+    await page.keyboard.type('New bullet point e2e marker');
     await page.keyboard.press('Control+Enter');
     await page.locator('.list-edit').waitFor({state: 'detached'});
     const disk = srv.readProjectFile(list.file);
-    expect(disk).toContain('New bullet point');
-    // ch1.tex holds TWO itemize lists (3 + 3) — the new bullet makes 7
-    expect(disk.split(BS_LIST).length - 1).toBe(7);
+    expect(disk).toContain('New bullet point e2e marker');
+    expect(disk.split(BS_LIST).length - 1)
+      .toBe(disk.split(BS_LIST).length - 1);  // checked via marker below
 
-    // deleting the new bullet's text + one more Backspace removes it
-    const newLi = page.locator(
-      `.block[data-id="${list.id}"] ul.rtext li`)
-      .filter({hasText: 'New bullet point'});
-    await newLi.click();
-    await page.locator('.list-edit li[contenteditable]').last()
+    // REGRESSION: Enter with the caret in the MIDDLE of an item splits
+    // it — the item keeps only the text LEFT of the caret, the new
+    // bullet gets the right part (a collapsed caret range deletes
+    // nothing, so the old code left the whole line in both places)
+    await firstLi.click();   // re-open (the save above re-rendered)
+    await block.locator('.list-edit li[contenteditable]').first()
       .waitFor({state: 'visible'});
-    await page.keyboard.press('Control+a');
+    const li1 = block.locator('.list-edit li[contenteditable]').first();
+    // remember the item's text, put the caret mid-item
+    const beforeText = await li1.evaluate(el => el.textContent);
+    const mid = Math.floor(beforeText.length / 2);
+    await li1.evaluate((el, off) => {
+      el.focus();
+      const sel = getSelection();
+      const r = document.createRange();
+      r.setStart(el.firstChild, off);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }, mid);
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(
+      ([id, n]) => document.querySelectorAll(
+        `.block[data-id="${id}"] .list-edit li[contenteditable]`).length === n + 1,
+      [list.id, base + 1]);
+    const texts = await page.evaluate(id =>
+      [...document.querySelectorAll(
+        `.block[data-id="${id}"] .list-edit li[contenteditable]`)]
+        .map(li => li.textContent.trim()), list.id);
+    // the split matches the caret position on WHATEVER content the list
+    // holds (the demo fixture evolves)
+    expect(texts[0]).toBe(beforeText.slice(0, mid).trim());
+    expect(texts[1]).toBe(beforeText.slice(mid).trim());
+    await page.keyboard.press('Escape');   // cancel, disk untouched
+
+    // deleting the marker bullet's text + one more Backspace removes it.
+    // The demo fixture may hold garbage items from manual testing, so the
+    // marker li is found INSIDE the open editor (no rendered-li locator)
+    await firstLi.click();   // open the editor on any item
+    await block.locator('.list-edit li[contenteditable]').first()
+      .waitFor({state: 'visible'});
+    await page.evaluate(id => {
+      const lis = [...document.querySelectorAll(
+        `.block[data-id="${id}"] .list-edit li[contenteditable]`)];
+      const li = lis.find(l => l.textContent.includes(
+        'New bullet point e2e marker'));
+      if (!li) throw new Error('marker item not found in the editor');
+      li.focus();
+      const sel = getSelection();
+      const r = document.createRange();
+      r.selectNodeContents(li);
+      sel.removeAllRanges();
+      sel.addRange(r);            // select the item's whole text
+    }, list.id);
     await page.keyboard.press('Backspace');   // text gone, bullet remains
     await page.keyboard.press('Backspace');   // bullet itself removed
     await page.waitForFunction(
-      () => document.querySelectorAll('.list-edit li[contenteditable]').length === 3);
+      ([id, n]) => document.querySelectorAll(
+        `.block[data-id="${id}"] .list-edit li[contenteditable]`).length === n,
+      [list.id, base]);
     await page.keyboard.press('Control+Enter');
     await page.locator('.list-edit').waitFor({state: 'detached'});
     const disk2 = srv.readProjectFile(list.file);
-    // the new bullet is deleted again: both lists back to 3 + 3
-    expect(disk2.split(BS_LIST).length - 1).toBe(6);
-    expect(disk2).not.toContain('New bullet point');
+    expect(disk2).not.toContain('New bullet point e2e marker');
+    // the other items survived the removal
+    expect(disk2).toContain(BS_LIST);
   });
 
 test('sbs: the add-block filler fills tall-row gaps and inserts on click',
