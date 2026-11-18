@@ -35,20 +35,20 @@ for headless).
 
 ## Layout
 
-| Path | Role |
-|---|---|
-| `texperiment/server.py` | FastAPI app: routes, `Store` (block model + ops + undo history), watchers, TeX engine detection, settings |
-| `texperiment/parser.py` | LaTeX → block model (types, source spans) |
-| `texperiment/storage.py` | `FileStore` (atomic writes, one `.bak` per session), `patch()` span edits with drift fallback |
-| `texperiment/gitops.py` | git wrapper (serialized by `_GIT_LOCK`), block diffs, index surgery for per-block staging |
-| `texperiment/proof.py` | Proofreading engines; LanguageTool downloads ONLY via explicit user request (`start_install`) |
-| `texperiment/watcher.py` | Debounced watchdog watchers (.tex reload, .bib, figures) |
-| `texperiment/desktop.py` | Window/browser/server presentation modes, single-instance, system hand-off |
-| `texperiment/version.py` | The single version source (exe, installer, UI) |
-| `web/app.js` | The whole frontend — one classic script, top-level functions on `window`, shared `state` object |
-| `web/index.html` | Assets are cache-busted with `?v=N` query strings (bump on every JS/CSS change) |
-| `web/vendor/` | Vendored KaTeX/MathLive, pinned by `manifest.json` sha256s — never edit by hand |
-| `packaging/` | Spec, installer, build scripts, vendor/tectonic fetchers |
+| Path                       | Role                                                                                                        |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `texperiment/server.py`  | FastAPI app: routes, `Store` (block model + ops + undo history), watchers, TeX engine detection, settings |
+| `texperiment/parser.py`  | LaTeX → block model (types, source spans)                                                                  |
+| `texperiment/storage.py` | `FileStore` (atomic writes, one `.bak` per session), `patch()` span edits with drift fallback         |
+| `texperiment/gitops.py`  | git wrapper (serialized by `_GIT_LOCK`), block diffs, index surgery for per-block staging                 |
+| `texperiment/proof.py`   | Proofreading engines; LanguageTool downloads ONLY via explicit user request (`start_install`)             |
+| `texperiment/watcher.py` | Debounced watchdog watchers (.tex reload, .bib, figures)                                                    |
+| `texperiment/desktop.py` | Window/browser/server presentation modes, single-instance, system hand-off                                  |
+| `texperiment/version.py` | The single version source (exe, installer, UI)                                                              |
+| `web/app.js`             | The whole frontend — one classic script, top-level functions on `window`, shared `state` object        |
+| `web/index.html`         | Assets are cache-busted with `?v=N` query strings (bump on every JS/CSS change)                           |
+| `web/vendor/`            | Vendored KaTeX/MathLive, pinned by `manifest.json` sha256s — never edit by hand                          |
+| `packaging/`             | Spec, installer, build scripts, vendor/tectonic fetchers                                                    |
 
 ## Hard rules
 
@@ -63,7 +63,9 @@ for headless).
 4. **Bump `?v=N` in `web/index.html` for every app.js/style.css change** — `tests/web/assets.test.js` enforces this.
 5. **All suites green before committing**: `ruff`, `pytest`, `eslint`, `npm test`, and `npm run test:e2e` when UI behavior changed.
 6. **No new pytest warnings** — `filterwarnings = ["error"]`.
-7. Only commit when the user asks.
+7. Use git worktrees to not tangle the files with other agents.
+8. Start the server without the --window argument for your tests
+9. Only commit when the user asks.
 
 ## Conventions
 
