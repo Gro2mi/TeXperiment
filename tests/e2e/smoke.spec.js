@@ -108,6 +108,14 @@ async function editBlockViaRawColumn(page, rel, blockId, oldSource,
   await page.evaluate(({rel: f, blockId: bid, newSrc, oldLen}) => {
     const el = document.querySelector(
       `.sbsfileseg[data-file="${f}"][data-block-id="${bid}"]`);
+    // collapsed segments display a shortened copy and only reveal the
+    // real source on mousedown — a real editor click expands first, so
+    // the pipeline must too or the edit lands on the display text (and
+    // rawFileText keeps reading the untouched _realSrc: never dirty)
+    if (el._realSrc !== undefined && !el._expanded) {
+      el.textContent = el._realSrc;
+      el._expanded = true;
+    }
     // old segment text = source + trailing separator — keep the separator
     el.textContent = newSrc + el.textContent.slice(oldLen);
     el.dispatchEvent(new Event('input', {bubbles: true}));
@@ -420,8 +428,32 @@ test('sbs: the add-block filler fills tall-row gaps and inserts on click',
     await fill.click();
     await page.locator('#insertmenu').waitFor({state: 'visible'});
     // clicking elsewhere closes it (the menu listens for the next
-    // document click — avoid the toolbar, its buttons stop propagation)
-    await page.mouse.click(700, 300);
+    // document click). The point must be verified neutral — a .sbsfill
+    // click OPENS another menu, segments and toolbar buttons stop
+    // propagation so the close listener never fires. A background
+    // re-render (git-diff marks) can shift layout between the probe and
+    // the click, dropping the point onto a filler: verify and retry
+    for (let i = 0; i < 3; i++) {
+      const spot = await page.evaluate(() => {
+        const bad = '.sbsfill, .sbsfileseg, .block, #insertmenu, ' +
+                    '#toolbar, #sidebar, button, a, .editor, .inline-ce';
+        for (let y = 60; y < innerHeight - 20; y += 40) {
+          for (const x of [innerWidth - 30, 30, Math.floor(innerWidth / 2)]) {
+            const el = document.elementFromPoint(x, y);
+            if (el && !el.closest(bad)) return {x, y};
+          }
+        }
+        return null;
+      });
+      if (spot) await page.mouse.click(spot.x, spot.y);
+      else await page.evaluate(
+        () => document.body.dispatchEvent(new MouseEvent('click')));
+      try {
+        await page.locator('#insertmenu')
+          .waitFor({state: 'detached', timeout: 2500});
+        break;
+      } catch (e) { /* point drifted onto a filler, menu re-opened — rescan */ }
+    }
     await page.locator('#insertmenu').waitFor({state: 'detached'});
   });
 
@@ -818,13 +850,21 @@ test('proofreading finds a misspelling and the chip fix rewrites it',
     await page.waitForFunction('state.proof && state.proof.checked',
       null, {timeout: 20000});
     const doc = await currentDoc(srv);
+    // retry-robust: attempt 1 already replaced the 'Align environments'
+    // paragraph, so a retry must find the already-saved block instead
     const para = doc.blocks.find(b => b.file === 'chapters/ch1.tex' &&
-      b.type === 'paragraph' && b.source.includes('Align environments'));
+      b.type === 'paragraph' &&
+      (b.source.includes('Align environments') ||
+       b.source.includes('mispelled words')));
     await apiSaveBlock(srv, para.id,
       'Proofreading finds mispelled words in this paragraph.');
-    // the save went through the API — the client doc is stale until the
-    // watcher's WS reload lands; the check maps flagged offsets onto the
-    // client doc, so it must catch up first
+    // an API-side save is a server self-write: the watcher suppresses
+    // its own events for 1.5 s (should_process), so NO WS reload ever
+    // arrives — pull the doc explicitly, exactly like the app does with
+    // the save response a UI edit gets
+    // string form: refreshDoc is an app global, invisible to eslint in a
+    // function callback (same convention as the waitForFunction strings)
+    await page.evaluate('refreshDoc()');
     await page.waitForFunction(
       "state.doc.blocks.some(b => b.source.includes('mispelled words'))",
       null, {timeout: 10000});
