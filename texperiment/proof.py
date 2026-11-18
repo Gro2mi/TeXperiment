@@ -272,12 +272,24 @@ class LanguageToolEngine:
 
     @staticmethod
     def _jar_present():
-        # language-tool-python's download cache (one jar per version)
-        base = Path.home() / '.cache' / 'language_tool_python'
+        # language-tool-python only accepts the jar for the version IT
+        # downloads (get_jar_path looks in cache/<LanguageTool-<ver>/) —
+        # a cache holding a different version must read as missing, or
+        # the panel reports "ready" and checks fail with FileNotFoundError
+        # instead of offering the download
         try:
-            return any(base.rglob('languagetool-server.jar'))
-        except OSError:
-            return False
+            from language_tool_python.download_lt import LocalLanguageTool
+            from language_tool_python.server import LTP_DOWNLOAD_VERSION
+            lt = LocalLanguageTool.from_version_name(LTP_DOWNLOAD_VERSION)
+            return lt.get_jar_path().exists()
+        except Exception:
+            # the library could not tell us (not importable / odd cache) —
+            # fall back to a scan of its cache root
+            base = Path.home() / '.cache' / 'language_tool_python'
+            try:
+                return any(base.rglob('languagetool-server.jar'))
+            except OSError:
+                return False
 
     @staticmethod
     def _quiet_popen():
@@ -321,6 +333,11 @@ class LanguageToolEngine:
         elif jar:
             state = 'ready'
         else:
+            state = 'needs-download'
+        # a failed construction (broken java, corrupt cache) must not
+        # dead-end the panel on "ready": surface the decision box again
+        # with the error, so the user can retry or switch engines
+        if self._error and state == 'ready':
             state = 'needs-download'
         return {'java': java, 'jar': jar, 'state': state,
                 'installing': self._installing, 'error': self._install_error}
@@ -383,6 +400,7 @@ class LanguageToolEngine:
                     f'LanguageTool could not start: {e} '
                     '(fall back to the offline spellchecker in the '
                     'Proofreading panel)')
+                self._install_error = str(e)
                 raise ProofError(self._error)
         return self._lt[lang]
 

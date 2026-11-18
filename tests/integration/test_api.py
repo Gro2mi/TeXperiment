@@ -386,6 +386,63 @@ def test_proof_config_check_dictionary_ignore(client):
     assert r.status_code == 200 and r.json() == {'ok': True}
 
 
+def test_proof_languagetool_version_mismatch_offers_download(client, monkeypatch):
+    """A cache holding a DIFFERENT LanguageTool version than the library
+    pins must read as needs-download (the user gets the decision box),
+    and a failed construction must flip the panel back to that box
+    instead of dead-ending on 'ready'."""
+    from texperiment import proof as proof_mod
+
+    c, pid, _ = client
+    r = c.post(f'/api/project/{pid}/proof/engine',
+               json={'engine': 'languagetool'})
+    assert r.status_code == 200
+
+    # java present, but the pinned-version jar is missing
+    monkeypatch.setattr(proof_mod.LanguageToolEngine, '_java_present',
+                        staticmethod(lambda: True))
+    monkeypatch.setattr(proof_mod.LanguageToolEngine, '_jar_present',
+                        staticmethod(lambda: False))
+    cfg = c.get(f'/api/project/{pid}/proof/config').json()
+    assert cfg['lt']['state'] == 'needs-download'
+
+    # a construction failure (e.g. broken java) must surface the decision
+    # box again instead of staying on 'ready'
+    eng = proof_mod.ENGINES['languagetool']()
+    eng._error = 'LanguageTool could not start: boom'
+    monkeypatch.setattr(proof_mod, '_cache', {})
+    monkeypatch.setattr(c.app.state, 'focus_cb',
+                        c.app.state.focus_cb, raising=False)
+    # swap the app's engine for the failing one
+    c.app  # noqa: B018
+    # the engine lives in eng_state inside create_app's closure — drive it
+    # through the runtime-switch route instead
+    r = c.post(f'/api/project/{pid}/proof/engine',
+               json={'engine': 'languagetool'})
+    cfg = r.json()
+    monkeypatch.setattr(proof_mod.LanguageToolEngine, '_java_present',
+                        staticmethod(lambda: True))
+    monkeypatch.setattr(proof_mod.LanguageToolEngine, '_jar_present',
+                        staticmethod(lambda: False))
+    # fail the construction while the state LOOKS ready (jar present):
+    # the panel must flip back to the decision box, not dead-end
+    class _Fail:
+        def __getattr__(self, name):
+            raise FileNotFoundError(2, 'No such file or directory', 'java')
+    monkeypatch.setitem(sys.modules, 'language_tool_python', _Fail())
+    monkeypatch.setattr(proof_mod, '_cache', {})
+    monkeypatch.setattr(proof_mod.LanguageToolEngine, '_jar_present',
+                        staticmethod(lambda: True))
+    r = c.post(f'/api/project/{pid}/proof/check', json={'lang': 'en-US'})
+    assert r.status_code == 400
+    assert 'could not start' in r.json()['detail']
+    cfg = c.get(f'/api/project/{pid}/proof/config').json()
+    # state flips to needs-download (decision box with buttons renders)
+    assert cfg['lt']['state'] == 'needs-download'
+    assert cfg['lt']['error'] is not None
+    assert 'java' in json.dumps(cfg['lt']['error']).lower()
+
+
 def test_proof_languagetool_gate_never_downloads(client, monkeypatch):
     """The LanguageTool engine reports its install state and REFUSES to
     check while the jar is missing — a check must never trigger the
