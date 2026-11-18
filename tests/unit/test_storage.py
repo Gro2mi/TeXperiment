@@ -156,4 +156,9 @@ def test_write_persistent_lock_preserves_the_file(tmp_path, monkeypatch):
             fs.write(p, 'never written', 'utf-8')
         assert p.read_text(encoding='utf-8') == 'original'
     finally:
-        tmp.chmod(0o666)  # let tmp_path teardown delete it on Windows
+        # the write's own cleanup may have already removed the denied
+        # temp file (Linux unlink ignores the file's mode bits and only
+        # needs a writable directory); restore writability only when it
+        # survived, so tmp_path teardown can delete it on Windows
+        if tmp.exists():
+            tmp.chmod(0o666)
