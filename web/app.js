@@ -2630,14 +2630,27 @@ function ceSpans(ref) {
 
 // rebuild the source from the edited DOM: atomic spans carry their exact
 // slice; plain/raw spans map text 1:1 (esc is per-char; whitespace runs
-// become plain spaces only in spans the user actually edited)
+// become plain spaces only in spans the user actually edited). The walk
+// must follow the ce's child nodes IN ORDER and take bare text nodes
+// literally: after select-all + type the browser REPLACES the spans with
+// one plain text node, and a spans-only read returned '' — the typed
+// text was silently dropped and an empty source committed.
 function ceSourceFromDom(ref) {
   let src = '';
-  for (const sp of ceSpans(ref)) {
-    const text = sp.textContent;
-    if (sp.dataset.kind === 'atomic') { src += sp.dataset.src; continue; }
-    src += text === srcToText(sp.dataset.src) ? sp.dataset.src : text;
-  }
+  const walk = node => {
+    for (const n of node.childNodes) {
+      if (n.nodeType === 3) { src += n.nodeValue; continue; }
+      if (n.nodeType !== 1) continue;
+      if (n.dataset && n.dataset.s0 !== undefined) {
+        const text = n.textContent;
+        if (n.dataset.kind === 'atomic') { src += n.dataset.src; continue; }
+        src += text === srcToText(n.dataset.src) ? n.dataset.src : text;
+        continue;  // a span owns its text — never descend into it
+      }
+      walk(n);     // wrapper elements without their own source slice
+    }
+  };
+  walk(ref.ec);
   return src;
 }
 
