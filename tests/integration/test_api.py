@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from texperiment.server import create_app
+from texperiment.storage import FileStore
 
 
 def git(root, *args):
@@ -178,6 +179,23 @@ def test_bad_move_direction_maps_to_400(client):
     r = c.post(f'/api/project/{pid}/block/{bid}/move',
                json={'direction': 'sideways'})
     assert r.status_code == 400
+
+
+def test_locked_file_maps_to_503(client, monkeypatch):
+    # a .tex locked by another program (Errno 13 — seen on Windows while
+    # a PDF export/antivirus holds project files) is a transient server
+    # condition, not a document conflict: the client must get 503 with a
+    # full-sentence hint it can show, never a 500 traceback
+    def denied(*args, **kwargs):
+        raise PermissionError(13, 'Permission denied')
+    monkeypatch.setattr(FileStore, 'write', denied)
+    c, pid, _ = client
+    tab = bid_by_prefix(c, pid, '\\begin{tabular}{ll}',
+                        file='chapters/ch2.tex')
+    r = c.post(f'/api/project/{pid}/block/{tab}/move',
+               json={'direction': 'down', 'positions': 1})
+    assert r.status_code == 503
+    assert 'locked' in r.json()['detail']
 
 
 # -- sections ------------------------------------------------------------------

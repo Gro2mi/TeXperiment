@@ -3,8 +3,12 @@
 `patch()` is the last line of defense against corrupting a .tex file: it
 only replaces text it can anchor, and returns None (conflict) otherwise.
 """
+import threading
 import time
 
+import pytest
+
+import texperiment.storage as storage
 from texperiment.storage import FileStore, patch
 
 # -- patch ----------------------------------------------------------------------
@@ -107,3 +111,49 @@ def test_filestore_sets_last_write_marker(tmp_path):
     path_str, ts = fs.last_write
     assert path_str == str(p)
     assert ts >= t0
+
+
+# -- locked-file retries ------------------------------------------------------------
+# Windows denies writes to project files with Errno 13 while another
+# process holds them: a PDF export just spawned pdflatex over the
+# sources, an antivirus scans each file it created, a sync client or
+# indexer touches the directory. One denied write used to fail the whole
+# edit with a 500 (seen live: block move during a PDF export).
+
+def test_write_retries_a_transient_lock(tmp_path):
+    # the temp file is held read-only for a moment, then released — the
+    # write must survive it (retry window ~0.75 s, the lock lifts at 0.15)
+    fs = FileStore(tmp_path)
+    p = tmp_path / 'main.tex'
+    p.write_text('original', encoding='utf-8')
+    tmp = tmp_path / 'main.tex.tmp~'
+    tmp.write_text('', encoding='utf-8')
+    tmp.chmod(0o444)
+
+    def unlock():
+        time.sleep(0.15)
+        tmp.chmod(0o666)
+    threading.Thread(target=unlock).start()
+
+    fs.write(p, 'after the lock', 'utf-8')
+    assert p.read_text(encoding='utf-8') == 'after the lock'
+    assert list(tmp_path.glob('*.tmp~')) == []
+
+
+def test_write_persistent_lock_preserves_the_file(tmp_path, monkeypatch):
+    # the lock never lifts (the .tex sits open in a program that denies
+    # writes): give up fast (no retry delays), keep the original bytes
+    # untouched, and name the file in the error
+    monkeypatch.setattr(storage, 'WRITE_RETRY_DELAYS', (0.0,))
+    fs = FileStore(tmp_path)
+    p = tmp_path / 'main.tex'
+    p.write_text('original', encoding='utf-8')
+    tmp = tmp_path / 'main.tex.tmp~'
+    tmp.write_text('', encoding='utf-8')
+    tmp.chmod(0o444)
+    try:
+        with pytest.raises(PermissionError, match='main.tex'):
+            fs.write(p, 'never written', 'utf-8')
+        assert p.read_text(encoding='utf-8') == 'original'
+    finally:
+        tmp.chmod(0o666)  # let tmp_path teardown delete it on Windows

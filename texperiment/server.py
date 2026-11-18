@@ -808,6 +808,16 @@ def create_app(initial_mains=(), port=8080, proof_engine=None, engine='auto'):
             raise HTTPException(400, str(e))
         except FileNotFoundError as e:
             raise HTTPException(404, str(e))
+        except PermissionError as e:
+            # another program holds the file (Windows Errno 13: a PDF
+            # export still running, an antivirus scan, the .tex open in
+            # another editor). Transient and unrelated to the document,
+            # so not a 409 — the client shows this message verbatim.
+            raise HTTPException(503,
+                'Could not write the file — it is locked by another '
+                'program (a PDF export still running, an antivirus scan, '
+                'or the file open in another editor). Wait a moment and '
+                f'try again. ({e})')
 
     # -- projects -------------------------------------------------------------
     @app.get('/api/projects')
