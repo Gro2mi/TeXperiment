@@ -218,6 +218,14 @@ sup.fn::before { content: "("; } sup.fn::after { content: ")"; }
   text-align: center; font-size: .72em; color: var(--muted);
   font-family: -apple-system, "Segoe UI", sans-serif; margin-top: 2px;
 }
+/* editor chrome inside the rendered table/figure (label chips, preview
+   hint) is never part of the compiled document — half strength, like the
+   grid editor's gutter; hover restores full strength (chips are
+   clickable jumps) */
+.tabwrap .mathlabels, .tabwrap .editnote,
+.blkfig .mathlabels { opacity: .5; }
+.tabwrap .mathlabels .refchip:hover,
+.blkfig .mathlabels .refchip:hover { opacity: 1; }
 
 blockquote { border-left: 3px solid var(--panel-line); margin: .8em 0; padding: .2em 1em; color: var(--panel-ink); }
 
@@ -661,10 +669,17 @@ body.drag-active .grip { pointer-events: none; }
 .gcap input:disabled { opacity: .45; }
 table.gedit { border-collapse: collapse; margin: 8px 0 4px; }
 table.gedit td { border: 1px solid var(--panel-line); padding: 0; vertical-align: top; }
+/* gutter chrome (column letters, row numbers) and the hatched pad slots
+   never appear in the LaTeX document — dim them to half strength so the
+   editable cells read as the actual document content. Hover restores
+   full strength so the controls stay usable. */
 table.gedit td.gcol, table.gedit td.grow, table.gedit td.gcorner {
   border: none; background: none; text-align: center; vertical-align: middle;
   padding: 0 2px; min-width: 58px;
+  opacity: .5;
 }
+table.gedit tr:hover td.grow, table.gedit tr.selrow td.grow,
+table.gedit td.gcol:hover, table.gedit td.gcorner:hover { opacity: 1; }
 table.gedit td.gcorner { min-width: 10px; }
 .gcollabel {
   font-size: 10.5px; color: var(--muted); font-family: var(--mono);
@@ -679,9 +694,13 @@ table.gedit td.gcol:hover .tgbtns { display: inline; }
 .tgbtn:hover { background: var(--hover-bg); color: var(--accent); }
 .tgbtn.onrule { color: var(--accent); }
 table.gedit td.gcol, table.gedit td.grow { min-width: 108px; }
-table.gedit td.gpad { background:
-  repeating-linear-gradient(45deg, transparent, transparent 6px,
-  var(--soft-bg) 6px, var(--soft-bg) 7px); }
+table.gedit td.gpad {
+  border-color: color-mix(in srgb, var(--panel-line) 50%, transparent);
+  background:
+    repeating-linear-gradient(45deg, transparent, transparent 6px,
+    color-mix(in srgb, var(--soft-bg) 50%, transparent) 6px,
+    color-mix(in srgb, var(--soft-bg) 50%, transparent) 7px);
+}
 tr.rulegap td {
   border: none !important; padding: 0; height: 14px; text-align: center;
   background: none;
