@@ -66,9 +66,12 @@ export async function startServer() {
   const env = {...process.env,
     USERPROFILE: home, HOME: home,
     PYTHONUNBUFFERED: '1'};
+  // --no-window: server only — no native window, no browser tab. Without
+  // it the dev default ('auto' → browser) opens the system browser every
+  // time a test server boots, spamming the developer's machine
   const proc = spawn('python', ['-m', 'texperiment',
     join(projDir, 'main.tex'), '--port', String(port),
-    '--proof-engine', 'spellcheck'],
+    '--proof-engine', 'spellcheck', '--no-window'],
     {cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe']});
   let log = '';
   proc.stdout.on('data', d => { log += d; });

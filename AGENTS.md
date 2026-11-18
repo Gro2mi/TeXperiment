@@ -64,7 +64,7 @@ for headless).
 5. **All suites green before committing**: `ruff`, `pytest`, `eslint`, `npm test`, and `npm run test:e2e` when UI behavior changed.
 6. **No new pytest warnings** — `filterwarnings = ["error"]`.
 7. Use git worktrees to not tangle the files with other agents.
-8. Start the server without the --window argument for your tests
+8. Start test servers with `--no-window` — the dev default opens a browser tab on the developer's machine, which piles up windows during test runs.
 9. Only commit when the user asks.
 
 ## Conventions
