@@ -11,6 +11,9 @@
 # ONLY the first-party code (texperiment/, web/, tectonic/). App-code
 # edits reach the dist in seconds; run a full build when dependencies or
 # the spec change (validated by a stamp, else the full path runs).
+# --server: build the server-only flavor (TEXPERIMENT_FLAVOR=server): no
+# pywebview/PIL, console exe named TeXperiment-Server, packaged as a
+# plain zip — it runs the server and opens the browser on start.
 #
 # Runtime system packages (not bundlable): WebKit2GTK for the window mode,
 #   sudo apt install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 libgtk-3-0
@@ -21,17 +24,22 @@ cd "$(dirname "$0")/.."
 
 UNPACKED=0
 INCREMENTAL=0
+SERVER=0
 for arg in "$@"; do
     case "$arg" in
         --unpacked) UNPACKED=1 ;;
         --incremental) INCREMENTAL=1 ;;
-        *) echo "unknown option: $arg (supported: --unpacked --incremental)" >&2; exit 2 ;;
+        --server) SERVER=1; export TEXPERIMENT_FLAVOR=server ;;
+        *) echo "unknown option: $arg (supported: --unpacked --incremental --server)" >&2; exit 2 ;;
     esac
 done
+APP_NAME=TeXperiment
+[ "$SERVER" = "1" ] && APP_NAME=TeXperiment-Server
 
-CACHE=build/distcache
+CACHE="build/distcache${SERVER:+-server}"
 # the stamp pins everything the cached payload depends on that is NOT
-# first-party app code (which is always overlaid fresh)
+# first-party app code (which is always overlaid fresh) — including the
+# flavor, so desktop and server caches never mix
 STAMP_INPUTS=$(cat requirements.txt texperiment.spec packaging/run_desktop.py \
     | sha256sum | cut -d' ' -f1)
 
@@ -39,7 +47,7 @@ incremental_valid() {
     [ -f "$CACHE/.stamp" ] || return 1
     PYI_VERSION=$(python -m PyInstaller --version 2>/dev/null || echo missing)
     PY_VERSION=$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-    WANT="${PYI_VERSION}|${PY_VERSION}|${STAMP_INPUTS}"
+    WANT="${APP_NAME}|${PYI_VERSION}|${PY_VERSION}|${STAMP_INPUTS}"
     [ "$(cat "$CACHE/.stamp")" = "$WANT" ]
 }
 
@@ -49,7 +57,7 @@ overlay_first_party() {
     for pair in "texperiment:_internal/texperiment" \
                 "web:_internal/web" \
                 "packaging/tectonic:_internal/tectonic"; do
-        src="${pair%%:*}"; dst="dist/TeXperiment/${pair#*:}"
+        src="${pair%%:*}"; dst="dist/$APP_NAME/${pair#*:}"
         rm -rf "$dst"
         cp -a "$src" "$dst"
         find "$dst" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
@@ -58,16 +66,16 @@ overlay_first_party() {
 
 VERSION=$(python -c "import sys; sys.path.insert(0, '.'); from texperiment import __version__; print(__version__)")
 
-echo "== TeXperiment $Version build (linux) =="
+echo "== TeXperiment $Version build (linux $APP_NAME) =="
 
 if [ "$INCREMENTAL" = "1" ] && incremental_valid; then
     echo "== incremental: reusing cached third-party payload =="
     # cheap no-op-when-present checks — the overlay copies both trees
     python packaging/fetch_vendor.py --check
     python packaging/fetch_tectonic.py
-    rm -rf dist/TeXperiment
-    cp -a "$CACHE" dist/TeXperiment
-    rm -f dist/TeXperiment/.stamp
+    rm -rf "dist/$APP_NAME"
+    cp -a "$CACHE" "dist/$APP_NAME"
+    rm -f "dist/$APP_NAME/.stamp"
     overlay_first_party
 elif [ "$INCREMENTAL" = "1" ]; then
     echo "== incremental requested but cache missing/stale — full build =="
@@ -82,10 +90,10 @@ elif [ "$INCREMENTAL" = "1" ]; then
     # populate the payload cache for the next incremental build (stamp
     # computed after the deps are installed — that is what it validates)
     rm -rf "$CACHE"
-    cp -a dist/TeXperiment "$CACHE"
+    cp -a "dist/$APP_NAME" "$CACHE"
     PYI_VERSION=$(python -m PyInstaller --version)
     PY_VERSION=$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-    echo "${PYI_VERSION}|${PY_VERSION}|${STAMP_INPUTS}" > "$CACHE/.stamp"
+    echo "${APP_NAME}|${PYI_VERSION}|${PY_VERSION}|${STAMP_INPUTS}" > "$CACHE/.stamp"
 else
     # 1. build-time python deps
     python -m pip install --quiet --user pyinstaller pywebview
@@ -99,9 +107,18 @@ fi
 
 if [ "$UNPACKED" = "1" ]; then
     # versioned folder so several builds can sit side by side in dist/
-    rm -rf "dist/TeXperiment-$VERSION"
-    mv dist/TeXperiment "dist/TeXperiment-$VERSION"
-    echo "== done: dist/TeXperiment-$VERSION (run ./TeXperiment inside) =="
+    rm -rf "dist/$APP_NAME-$VERSION"
+    mv "dist/$APP_NAME" "dist/$APP_NAME-$VERSION"
+    echo "== done: dist/$APP_NAME-$VERSION (run ./$APP_NAME inside) =="
+    exit 0
+fi
+
+if [ "$SERVER" = "1" ]; then
+    # the server flavor ships as a plain zip — no viewer, no WebKit2GTK
+    # runtime requirement, runs the server and opens the browser
+    (cd dist && rm -f "texperiment-${VERSION}-server-linux.zip" \
+        && zip -qr "texperiment-${VERSION}-server-linux.zip" TeXperiment-Server)
+    echo "== done: dist/texperiment-${VERSION}-server-linux.zip =="
     exit 0
 fi
 

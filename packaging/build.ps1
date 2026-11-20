@@ -10,18 +10,25 @@
 # ONLY the first-party code (texperiment/, web/, tectonic/). App-code
 # edits reach the dist in seconds; run a full build when dependencies or
 # the spec change (validated by a stamp, else the full path runs).
-param([switch]$Unpacked, [switch]$Incremental)
+# -ServerOnly: build the server-only flavor (TEXPERIMENT_FLAVOR=server):
+# no pywebview/PIL, console exe named TeXperiment-Server, packaged as a
+# plain zip — it runs the server and opens the browser on start.
+param([switch]$Unpacked, [switch]$Incremental, [switch]$ServerOnly)
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
 
+if ($ServerOnly) { $env:TEXPERIMENT_FLAVOR = 'server' }
+$AppName = if ($ServerOnly) { 'TeXperiment-Server' } else { 'TeXperiment' }
+
 $Version = python -c "import sys; sys.path.insert(0, '.'); from texperiment import __version__; print(__version__)"
 
-Write-Host "== TeXperiment $Version build =="
+Write-Host "== TeXperiment $Version build ($AppName) =="
 
 # payload cache: the third-party part of the last full build. The stamp
 # pins everything the cache's content depends on that is NOT first-party
-# app code (which is always overlaid fresh)
-$CacheDir = 'build\distcache'
+# app code (which is always overlaid fresh) — including the flavor, so
+# desktop and server caches never mix
+$CacheDir = if ($ServerOnly) { 'build\distcache-server' } else { 'build\distcache' }
 $StampFiles = @('requirements.txt', 'texperiment.spec',
                 'packaging/run_desktop.py')
 function Get-PayloadStamp {
@@ -32,7 +39,7 @@ function Get-PayloadStamp {
     $hashes = ($StampFiles | ForEach-Object {
         (Get-FileHash $_ -Algorithm SHA256).Hash
     }) -join '|'
-    $input = "$pyi|$pyv|$hashes"
+    $input = "$AppName|$pyi|$pyv|$hashes"
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($input)
     $sha = [System.Security.Cryptography.SHA256]::Create()
     ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '')
@@ -44,10 +51,10 @@ if ($Incremental -and (Test-Path "$CacheDir\.stamp") -and
     # cheap no-op-when-present checks — the overlay copies both trees
     python packaging/fetch_vendor.py --check
     python packaging/fetch_tectonic.py
-    if (Test-Path dist\TeXperiment) {
-        Remove-Item -Recurse -Force dist\TeXperiment
+    if (Test-Path "dist\$AppName") {
+        Remove-Item -Recurse -Force "dist\$AppName"
     }
-    robocopy $CacheDir dist\TeXperiment /MIR /XF .stamp /NFL /NDL /NJH | Out-Null
+    robocopy $CacheDir "dist\$AppName" /MIR /XF .stamp /NFL /NDL /NJH | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "cache copy failed (exit $LASTEXITCODE)" }
     # first-party overlay: app code, served web tree, tectonic binary.
     # /MIR makes the target exactly the source (removes stale files);
@@ -56,7 +63,7 @@ if ($Incremental -and (Test-Path "$CacheDir\.stamp") -and
         @('texperiment', '_internal\texperiment'),
         @('web', '_internal\web'),
         @('packaging\tectonic', '_internal\tectonic'))) {
-        $dst = "dist\TeXperiment\$($pair[1])"
+        $dst = "dist\$AppName\$($pair[1])"
         robocopy $pair[0] $dst /MIR /NFL /NDL `
             /NJH /XF *.pyc /XD __pycache__ | Out-Null
         if ($LASTEXITCODE -ge 8) {
@@ -88,17 +95,25 @@ if ($Incremental -and (Test-Path "$CacheDir\.stamp") -and
     if (Test-Path $CacheDir) {
         Remove-Item -Recurse -Force $CacheDir
     }
-    robocopy dist\TeXperiment $CacheDir /MIR /XF .stamp /NFL /NDL /NJH | Out-Null
+    robocopy "dist\$AppName" $CacheDir /MIR /XF .stamp /NFL /NDL /NJH | Out-Null
     Get-PayloadStamp | Set-Content "$CacheDir\.stamp" -NoNewline
 }
 
 if ($Unpacked) {
     # versioned folder so several builds can sit side by side in dist\
-    if (Test-Path "dist\TeXperiment-$Version") {
-        Remove-Item -Recurse -Force "dist\TeXperiment-$Version"
+    if (Test-Path "dist\$AppName-$Version") {
+        Remove-Item -Recurse -Force "dist\$AppName-$Version"
     }
-    Move-Item dist\TeXperiment "dist\TeXperiment-$Version"
-    Write-Host "== done: dist\TeXperiment-$Version (run TeXperiment.exe inside) =="
+    Move-Item "dist\$AppName" "dist\$AppName-$Version"
+    Write-Host "== done: dist\$AppName-$Version (run $AppName.exe inside) =="
+    exit 0
+}
+
+if ($ServerOnly) {
+    # the server flavor ships as a plain zip — no installer, no setup
+    Compress-Archive -Path "dist\$AppName" `
+        -DestinationPath "dist\TeXperiment-$Version-server-windows.zip" -Force
+    Write-Host "== done: dist\TeXperiment-$Version-server-windows.zip =="
     exit 0
 }
 

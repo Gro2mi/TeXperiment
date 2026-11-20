@@ -43,6 +43,14 @@ class _SourceFirstFinder:
 if _BASE:
     sys.meta_path.insert(0, _SourceFirstFinder())
 
+# the server-only distribution (texperiment.spec, TEXPERIMENT_FLAVOR=server)
+# ships without pywebview — detect that and tell desktop.py so its frozen
+# 'auto' resolves straight to the browser (this build's UI) instead of
+# attempting a window and relying on the ImportError fallback note
+import importlib.util
+if importlib.util.find_spec('webview') is None:
+    os.environ.setdefault('TEXPERIMENT_FLAVOR', 'server')
+
 from texperiment.__main__ import main
 
 if __name__ == '__main__':

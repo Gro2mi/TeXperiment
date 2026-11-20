@@ -90,7 +90,7 @@ for headless).
 - **Windows denies writes transiently (Errno 13)**: while a PDF export runs, an antivirus scans the files it created, or a sync client touches the project dir, opens/replaces fail for a moment. `FileStore.write` retries (`WRITE_RETRY_DELAYS`); `_run` maps a persistent `PermissionError` to 503 (not 409 — the frontend's 409 branch claims "file changed on disk", which would mislead).
 - **PowerShell 5.1 reads BOM-less UTF-8 scripts as ANSI**: an em-dash inside a double-quoted string decodes to a cp1252 closing quote and terminates the string mid-message (parser errors pointing at seemingly unrelated lines). Keep string literals ASCII (`--`), em-dashes only in comments. Also: `python -c '...'` args passed from PowerShell lose their inner double quotes — nest single-quoted Python strings inside a double-quoted PowerShell string.
 - **`state.desktop`** gates native-shell behavior (system browser/PDF viewer instead of `window.open`) — fetch `/api/env` semantics.
-- **Packaging**: `packaging/tectonic/`, `packaging/tools/`, `dist/`, `build/` are gitignored build outputs; the CI build job (`.github/workflows/build.yml`) mirrors `build.ps1`/`build.sh` step-for-step — keep them in sync.
+- **Packaging**: `packaging/tectonic/`, `packaging/tools/`, `dist/`, `build/` are gitignored build outputs; the CI build job (`.github/workflows/build.yml`) mirrors `build.ps1`/`build.sh` step-for-step — keep them in sync. The spec has two flavors via `TEXPERIMENT_FLAVOR` (desktop default; `server` = no viewer, console `TeXperiment-Server` exe, plain zip) — the flavor is part of the incremental cache stamp, so desktop/server caches never mix.
 
 ## Verification checklist (before saying "done")
 

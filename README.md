@@ -17,6 +17,8 @@ nothing hidden on disk. WYSIWYG for the *content*, not the layout.
   `./TeXperiment/TeXperiment`; the native window needs WebKit2GTK —
   `sudo apt install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 libgtk-3-0` —
   otherwise it runs as a server and opens your browser).
+- **Server-only** (`*server-*.zip`, both OSes): no viewer bundled — runs
+  the server and opens the UI in your browser; `--no-window` for headless.
 
 Open any `main.tex` via the **＋** sidebar button. LaTeX and git unlock optional .
 
@@ -80,7 +82,11 @@ bash packaging/build.sh --unpacked               # -> dist/TeXperiment-<ver>/TeX
 # (texperiment/, web/, tectonic/) — seconds instead of minutes; a full
 # build runs automatically when dependencies or the spec change
 powershell -File packaging/build.ps1 -Incremental
-bash packaging/build.sh --incremental# Linux: dist/texperiment-<ver>-linux.tar.gz
+bash packaging/build.sh --incremental               # Linux: dist/texperiment-<ver>-linux.tar.gz
+
+# server-only flavor: no viewer, opens the browser on start, plain zip
+powershell -File packaging/build.ps1 -ServerOnly
+bash packaging/build.sh --server
 ```
 
 The scripts install build-time deps (pyinstaller, pywebview, Inno Setup on

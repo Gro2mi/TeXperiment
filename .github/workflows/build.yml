@@ -85,6 +85,54 @@ jobs:
           VERSION=$(python -c "import sys; sys.path.insert(0,'.'); from texperiment import __version__; print(__version__)")
           tar -C dist -czf "dist/texperiment-${VERSION}-linux.tar.gz" TeXperiment
 
+      # server-only flavor: no viewer (no pywebview/PIL), console exe —
+      # runs the server and opens the browser on start; also drops the
+      # WebKit2GTK runtime requirement on linux
+      - name: Build server-only distribution
+        shell: bash
+        run: |
+          TEXPERIMENT_FLAVOR=server python -m PyInstaller texperiment.spec \
+            --noconfirm --distpath dist --workpath build
+
+      - name: Smoke test the server-only build
+        shell: bash
+        run: |
+          PORT=$(( RANDOM % 20000 + 20000 ))
+          if [ "${{ matrix.osname }}" = "windows" ]; then
+            ./dist/TeXperiment-Server/TeXperiment-Server.exe --no-window --port $PORT &
+          else
+            ./dist/TeXperiment-Server/TeXperiment-Server --no-window --port $PORT &
+          fi
+          APP_PID=$!
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:$PORT/api/projects" > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf "http://127.0.0.1:$PORT/api/projects" | grep -q '"id"'
+          curl -sf "http://127.0.0.1:$PORT/vendor/katex/katex.min.js" -o /dev/null
+          # the whole point of this flavor: the viewer must not ship
+          test ! -d dist/TeXperiment-Server/_internal/webview
+          test ! -d dist/TeXperiment-Server/_internal/PIL
+          kill $APP_PID 2>/dev/null || true
+
+      - name: Pack server zip
+        shell: bash
+        run: |
+          VERSION=$(python -c "import sys; sys.path.insert(0,'.'); from texperiment import __version__; print(__version__)")
+          cd dist
+          if [ "${{ matrix.osname }}" = "windows" ]; then
+            powershell -NoProfile -Command "Compress-Archive -Path TeXperiment-Server -DestinationPath TeXperiment-${VERSION}-server-windows.zip"
+          else
+            zip -qr "texperiment-${VERSION}-server-linux.zip" TeXperiment-Server
+          fi
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: texperiment-server-${{ matrix.osname }}
+          path: dist/*server-*.zip
+          if-no-files-found: error
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

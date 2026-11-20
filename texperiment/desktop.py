@@ -167,13 +167,31 @@ def _open_ui_url(url):
     webbrowser.open_new_tab(url)
 
 
+def resolve_mode(mode, frozen, flavor=''):
+    """Resolve the presentation mode. 'auto' opens the native window in
+    a frozen build and a browser tab in development — except in the
+    server-only distribution (flavor 'server', shipped without
+    pywebview), where the browser IS the UI. Explicit modes pass
+    through: --window on a server build still takes the window path,
+    whose ImportError fallback opens a browser tab with a note."""
+    if mode != 'auto':
+        if mode not in ('window', 'browser', 'server'):
+            raise ValueError(f'unknown presentation mode: {mode!r}')
+        return mode
+    if flavor == 'server' or not frozen:
+        return 'browser'
+    return 'window'
+
+
 def run(app, host, port, mode='auto', debug=False):
     """Start the server and present the UI. mode: 'window' | 'browser' |
-    'server' | 'auto' (window when frozen, browser tab otherwise).
+    'server' | 'auto' (window when frozen, browser tab otherwise — the
+    server-only distribution always resolves auto to the browser).
     Blocks until the window closes (or, server-only, until Ctrl+C)."""
     url = f'http://{host}:{port}'
     if mode == 'auto':
-        mode = 'window' if getattr(sys, 'frozen', False) else 'browser'
+        mode = resolve_mode(mode, getattr(sys, 'frozen', False),
+                            os.environ.get('TEXPERIMENT_FLAVOR', ''))
     if getattr(sys, 'frozen', False):
         _tee_output()
 
