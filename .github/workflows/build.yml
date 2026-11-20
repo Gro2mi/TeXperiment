@@ -46,10 +46,12 @@ jobs:
         shell: bash
         run: |
           PORT=$(( RANDOM % 20000 + 20000 ))
+          # open the demo project: a fresh CI machine has no restored
+          # projects, and the assertions below need at least one
           if [ "${{ matrix.osname }}" = "windows" ]; then
-            ./dist/TeXperiment/TeXperiment.exe --no-window --port $PORT &
+            ./dist/TeXperiment/TeXperiment.exe demo/main.tex --no-window --port $PORT &
           else
-            ./dist/TeXperiment/TeXperiment --no-window --port $PORT &
+            ./dist/TeXperiment/TeXperiment demo/main.tex --no-window --port $PORT &
           fi
           APP_PID=$!
           for i in $(seq 1 30); do
@@ -98,10 +100,11 @@ jobs:
         shell: bash
         run: |
           PORT=$(( RANDOM % 20000 + 20000 ))
+          # fresh CI machines have no restored projects — open the demo
           if [ "${{ matrix.osname }}" = "windows" ]; then
-            ./dist/TeXperiment-Server/TeXperiment-Server.exe --no-window --port $PORT &
+            ./dist/TeXperiment-Server/TeXperiment-Server.exe demo/main.tex --no-window --port $PORT &
           else
-            ./dist/TeXperiment-Server/TeXperiment-Server --no-window --port $PORT &
+            ./dist/TeXperiment-Server/TeXperiment-Server demo/main.tex --no-window --port $PORT &
           fi
           APP_PID=$!
           for i in $(seq 1 30); do
