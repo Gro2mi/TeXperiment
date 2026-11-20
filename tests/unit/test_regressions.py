@@ -134,3 +134,26 @@ def test_spans_stable_when_tail_changes(tmp_path):
     assert blocks0[0][1:3] == blocks1[0][1:3]  # head span identical
     assert blocks0[1][1:3] == blocks1[1][1:3]  # section span identical
     assert blocks1[2][1:3] == (text2.index('Tail one'), len(text2) - 1)
+
+
+# --- natexlab in natbib labels: \citep chips showed (Author, 2026\natexlabb) ---
+# natbib writes year suffixes into the optional bibitem label as
+# \bibitem[Fischer et~al.(2026\natexlab{b})]{key}; the display cleaner must
+# resolve \natexlab{X} to X (what LaTeX typesets), not keep the command name
+# after stripping braces. Bug + fix live in _latex_clean / _bbl_entry.
+
+def test_latex_clean_resolves_natexlab():
+    from texperiment.server import _latex_clean
+    assert _latex_clean(r'Fischer et~al.(2026\natexlab{b})') == \
+        'Fischer et al.(2026b)'
+    # suffix-less labels pass through unchanged
+    assert _latex_clean(r'Fischer et~al.(2026)') == 'Fischer et al.(2026)'
+
+
+def test_bbl_entry_year_takes_only_the_typeset_year():
+    from texperiment.server import _bbl_entry
+    e = _bbl_entry('fischer_towards_2026', 1,
+                   r'Fischer et~al.(2026\natexlab{b})',
+                   r'\newblock A title. (2026)', None)
+    assert e['authors'] == 'Fischer et al.'
+    assert e['year'] == '2026b'

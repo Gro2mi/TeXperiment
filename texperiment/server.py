@@ -641,6 +641,10 @@ def _parse_bbl(text):
 def _latex_clean(s):
     """Strip braces and resolve common accents for display strings."""
     s = s.replace('~', ' ')
+    # natbib year suffixes: \natexlab{b} typesets as plain 'b' — keep the
+    # argument, drop the command (brace stripping alone glued it to the
+    # command name: 2026\natexlab{b} displayed as 2026\natexlabb)
+    s = re.sub(r'\\natexlab\s*\{([^{}]*)\}', r'\1', s)
     for a, b in (('\\,', ' '), ('\\;', ' '), ('\\:', ' '), ('\\!', '')):
         s = s.replace(a, b)
     for a, b in (('\\"a', 'ä'), ('\\"o', 'ö'), ('\\"u', 'ü'), ('\\"A', 'Ä'),
@@ -674,6 +678,7 @@ def _tex_plain(s):
     """Light LaTeX → plain text conversion for reference tooltips."""
     s = re.sub(r'\\newblock\s*', ' ', s)
     s = re.sub(r'\\href\s*\{[^}]*\}\s*\{([^}]*)\}', r'\1', s)
+    s = re.sub(r'\\natexlab\s*\{([^{}]*)\}', r'\1', s)
     s = re.sub(r'\\(?:emph|textit|textbf|texttt|textsc|mbox|text|url|textrm)\s*\{([^{}]*)\}', r'\1', s)
     for a, b in (('\\,', ' '), ('\\;', ' '), ('\\:', ' '), ('\\!', ''),
                  ('\\&', '&'), ('\\%', '%'), ('\\_', '_'), ('\\$', '$'),
@@ -684,6 +689,26 @@ def _tex_plain(s):
     s = re.sub(r'---?', '–', s)               # en/em dashes
     s = re.sub(r'\s+', ' ', s).strip()
     return _latex_clean(s)
+
+
+def _bbl_entry(key, num, label, raw, extra):
+    """One bibliography entry from a .bbl bibitem: authors/year parsed
+    off the natbib optional label, .bib metadata joined on for the rich
+    hover popup."""
+    label = label or ''
+    authors = year = ''
+    if label:
+        clean = _latex_clean(label)
+        m = re.match(r'^(.*?)\(([^()]*)\)', clean)
+        if m:
+            authors, year = m.group(1).strip(), m.group(2).strip()
+        else:
+            authors = clean
+    return {'key': key, 'num': num, 'label': _latex_clean(label),
+            'url': _entry_url(raw) or (extra and extra.get('url')),
+            'authors': authors or (extra and extra.get('authors')) or '',
+            'year': year or (extra and extra.get('year')) or '',
+            'plain': _tex_plain(raw)}
 
 
 def create_app(initial_mains=(), port=8080, proof_engine=None, engine='auto'):
@@ -1271,22 +1296,10 @@ def create_app(initial_mains=(), port=8080, proof_engine=None, engine='auto'):
             entries = []
             for num, (key, label, raw) in enumerate(
                     _parse_bbl(bbl.read_text(encoding='utf-8', errors='replace')), 1):
-                authors = year = ''
-                if label:
-                    clean = _latex_clean(label)
-                    m = re.match(r'^(.*?)\(([^()]*)\)', clean)
-                    if m:
-                        authors, year = m.group(1).strip(), m.group(2).strip()
-                    else:
-                        authors = clean
                 # join the .bib metadata (title/journal/url) onto the bbl
                 # entry so hover popups are rich even in numeric styles
                 extra = next((e for e in bib_entries if e['key'] == key), None)
-                entries.append({'key': key, 'num': num, 'label': _latex_clean(label or ''),
-                                'url': _entry_url(raw) or (extra and extra.get('url')),
-                                'authors': authors or (extra and extra.get('authors')) or '',
-                                'year': year or (extra and extra.get('year')) or '',
-                                'plain': _tex_plain(raw)})
+                entries.append(_bbl_entry(key, num, label, raw, extra))
             # natbib author-year styles emit \bibitem[Author(Year)]{key};
             # numeric styles leave the optional label out
             style = ('authoryear'
