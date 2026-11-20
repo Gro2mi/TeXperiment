@@ -70,6 +70,11 @@ jobs:
       - name: Build installer (windows)
         if: matrix.osname == 'windows'
         shell: bash
+        # Git Bash path-converts arguments starting with '/' — /DVERSION
+        # arrived at ISCC as 'C:/Program Files/Git/DVERSION=...' and ISCC
+        # then saw two script filenames. Exclude all args from conversion.
+        env:
+          MSYS2_ARG_CONV_EXCL: '*'
         run: |
           VERSION=$(python -c "import sys; sys.path.insert(0,'.'); from texperiment import __version__; print(__version__)")
           "/c/Program Files (x86)/Inno Setup 6/ISCC.exe" "/DVERSION=$VERSION" packaging/installer.iss
