@@ -1,0 +1,7 @@
+# Byte-exact vendored assets: web/vendor/** is sha256-pinned in
+# web/vendor/manifest.json and the tectonic binary is a fetched binary.
+# Without -text, a Windows checkout (core.autocrlf=true on the CI
+# runners) converts the text-detected ones to CRLF and breaks the
+# manifest verification.
+web/vendor/** -text
+packaging/tectonic/** -text
