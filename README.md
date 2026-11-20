@@ -4,21 +4,24 @@ A realtime, local, **no-compile** LaTeX editor. Your document renders as
 styled content — paragraphs, formulas, tables, figures — and you edit it
 **in place**: click a block, change the text, and the edit is written
 straight back into the originating `.tex` file. No PDF compile loop,
-nothing hidden on disk. WYSIWYG for the *content*, not the layout. 
+nothing hidden on disk. WYSIWYG for the *content*, not the layout.
 
 ## Install & start
 
 **Download the latest release** from
 [GitHub Releases](https://github.com/Gro2mi/TeXperiment/releases/latest):
 
+- **Server-only** (`*server-*.zip`, both OSes) — **recommended**: no viewer
+  bundled, the UI runs in your normal browser (`--no-window` for headless).
+  The full application's native window does not support all features yet.
 - **Windows**: `TeXperimentSetup-<version>.exe` (installer) or the zip
   (unpack, run `TeXperiment.exe`).
 - **Linux**: `texperiment-<version>-linux.tar.gz` (unpack,
   `./TeXperiment/TeXperiment`; the native window needs WebKit2GTK —
   `sudo apt install libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1 libgtk-3-0` —
   otherwise it runs as a server and opens your browser).
-- **Server-only** (`*server-*.zip`, both OSes): no viewer bundled — runs
-  the server and opens the UI in your browser; `--no-window` for headless.
+
+
 
 Open any `main.tex` via the **＋** sidebar button. LaTeX and git unlock optional .
 
